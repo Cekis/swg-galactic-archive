@@ -115,6 +115,46 @@ and install it in a fresh directory. See [Portable deployment](#portable-deploym
 Existing installations can continue using `SWG_GAME_ROOT` or
 `-GameRoot` with the original manifest-backed catalog.
 
+## Agent access
+
+Give a web agent [the Agent data guide](http://127.0.0.1:8768/llms.txt).
+Its [route manifest](http://127.0.0.1:8768/api/agent/manifest) covers all eight
+collections. An agent can search for a name, open its stable game ID, and
+follow the returned relationships for tasks such as tracing a quest chain,
+finding a creature's spawn locations, or comparing crafting ingredients.
+The APIs also expose full dialogue, map layers, models, and source records.
+
+For file access, generate a JSON Lines bundle from the current catalog.
+
+~~~powershell
+python -B catalog_agent.py --sources .local/sources.json export --output .local/agent-data/catalog.zip
+~~~
+
+Extract the ZIP and start with its `llms.txt` and `manifest.json`.
+Use `names.jsonl` to find IDs and open the matching collection for
+the complete record. Separate files carry relationships, placements,
+loot rules, map geometry, and source evidence. The site serves artwork
+and renderable models through its asset APIs.
+
+An agent with command access can query the generated catalog directly.
+These examples use the current configuration. Pass `--database PATH`
+when working from a generated SQLite file or a portable deployment.
+
+~~~powershell
+python -B catalog_agent.py --sources .local/sources.json search "Watto"
+python -B catalog_agent.py --sources .local/sources.json list quests --scene tatooine
+python -B catalog_agent.py --sources .local/sources.json placements npcs watto --scene tatooine
+~~~
+
+Use `entity KIND ID` to read details, `related KIND ID ROLE` to
+page through a relationship, and `dialogue ID --query TEXT` to find
+a line or string code. For loot comparisons, `loot --item ITEM_ID`
+returns ranked NPCs and links to evidence. It keeps each item ID and
+scripted condition separate. Use `--output PATH.json` with `loot`
+to save a lookup to a shareable file.
+
+Rerun the export after regenerating the catalog to refresh the shareable ZIP.
+
 ## What the pages show
 
 Select a sortable column header to reorder the matching records across pages.
