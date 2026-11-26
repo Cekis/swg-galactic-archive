@@ -2,42 +2,38 @@
 
 import argparse
 from contextlib import ExitStack
-from hashlib import sha256
+from hashlib import sha1, sha256
 from importlib.metadata import version
 from io import BytesIO
 import json
 from pathlib import Path, PurePosixPath
-import subprocess
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 from zlib import crc32
 
+from archive_config import PROJECT, SourceRepository, add_source_options, select_profile
 from catalog_db import Catalog, packed
 from catalog_provenance import HASH, SourceCatalog, TEXT_TYPES, UPSTREAM_INDEX, valid_source
-from catalog_sources import DEFAULT_CLIENT, DEFAULT_TOOLS, PROJECT, ROOT
 from deployment_assets import BLOCK, MANIFEST, file_hash
 from deployment_trace import asset_destinations, audit_in_parallel
 from recover_item_models import UpstreamAssets, write_report
 from serve import ASSETS
 
 
-HELPERS = ("devtools/quests/manifest_sources.py", "devtools/quests/manifest_scripts.py",
-           "devtools/docker/validate_resource_distribution.py")
-OVERLAY = PROJECT / ".local/model-assets"
-DEFAULT_DB = PROJECT / ".local/catalog.sqlite3"
-DEFAULT_OUTPUT = PROJECT / ".local/deployments"
-
-
-def trace(catalog, client, tools, checkpoint=None):
+def trace(catalog, profile, checkpoint=None):
+    client, tools, game_data = (profile.root(role) for role in ("clientdata", "client-tools", "game-data"))
+    overlay = profile.overlay
     stat = catalog.path.stat()
     identity = {"database": str(catalog.path), "size": stat.st_size, "modified": stat.st_mtime_ns,
-                "revision": catalog.meta()["revision"]}
+                "revision": catalog.metadata()["revision"]}
+    if profile.key:
+        identity["source_key"] = profile.key
     if checkpoint:
         previous = json.loads(checkpoint.read_text(encoding="utf-8"))
         if previous["paths"] != identity:
-            raise ValueError("The catalog changed since the asset trace was created.")
+            raise ValueError("The catalog or source selection changed since the asset trace was created.")
         assets = asset_destinations(
             {(row["ref"], Path(row["source"]).resolve()) for row in previous["assets"]},
-            client, tools, ROOT, OVERLAY,
+            client, tools, game_data, overlay,
         )
         for row in previous["assets"]:
             path = assets[row["dest"].lower()][1]
@@ -46,22 +42,48 @@ def trace(catalog, client, tools, checkpoint=None):
                 raise ValueError(f"{row['dest']} changed since the asset trace was created.")
         return identity, assets, previous["audit"]
 
-    audit, files = audit_in_parallel(catalog.path, client, tools, ROOT, OVERLAY)
-    return identity, asset_destinations(files, client, tools, ROOT, OVERLAY), audit
+    audit, files = audit_in_parallel(catalog.path, client, tools, game_data, overlay)
+    return identity, asset_destinations(files, client, tools, game_data, overlay), audit
 
 
-def describe_assets(paths, snapshots):
+def github_assets(profile, paths):
+    """Resolve traced worktree files to their actual paths and object IDs on GitHub."""
+    for role, destination in (("clientdata", "clientdata/"), ("client-tools", "client-tools/"),
+                              ("game-data", "game/data/")):
+        repo = profile.repositories.get(role)
+        if not repo or not repo.github:
+            continue
+        root = repo.root.resolve()
+        selected = {repo.repository_path(path.relative_to(root).as_posix()): target
+                    for target, (_, path) in paths.items()
+                    if target.startswith(destination) and path.is_relative_to(root)}
+        if not selected:
+            continue
+        for remote_path, oid in repo.tree():
+            if target := selected.get(remote_path):
+                yield target, (oid, {"repository": repo.github, "revision": repo.revision, "path": remote_path})
+
+
+def describe_assets(paths, snapshots, published=()):
     assets = []
+    published = dict(published)
     for index, (target, (ref, path)) in enumerate(paths.items(), 1):
         checksum = sha256()
+        pinned = published.get(target)
+        object_id = sha1(f"blob {path.stat().st_size}\0".encode("ascii")) if pinned else None
         crc = length = 0
         with path.open("rb") as stream:
             for chunk in iter(lambda: stream.read(BLOCK), b""):
                 length += len(chunk)
-                crc = crc32(chunk, crc)
+                if snapshots:
+                    crc = crc32(chunk, crc)
+                if object_id:
+                    object_id.update(chunk)
                 checksum.update(chunk)
         report = {"path": target, "native_path": ref, "bytes": length, "sha256": checksum.hexdigest()}
-        if snapshots:
+        if pinned and object_id.hexdigest() == pinned[0]:
+            report["github"] = pinned[1]
+        elif snapshots:
             for archive, member, repo, revision, repository_path in snapshots.members.get(ref, ()):
                 if (isinstance(archive, ZipFile) and member.file_size == length and member.CRC == crc
                         and sha256(archive.read(member)).hexdigest() == report["sha256"]):
@@ -75,41 +97,35 @@ def describe_assets(paths, snapshots):
     return assets
 
 
-def local_source_zip(revision):
-    """Keep only repository text that cannot be linked to its published GitHub file."""
+def local_source_zip(revision, profile):
+    """Package excerpts from the selected local repositories that have no GitHub link."""
     if not HASH.fullmatch(revision):
-        raise ValueError("The catalog does not use a pinned game revision.")
-    published = SourceCatalog(revision).published_paths
-    tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", revision, "--", "dsrc/sku.0", "src"], cwd=ROOT)
-    local = []
-    for row in tree.rstrip(b"\0").split(b"\0"):
-        fields, _, raw = row.partition(b"\t")
-        if not raw:
-            continue
-        _, kind, key = fields.split()
-        path = raw.decode("utf-8")
-        if kind == b"blob" and path not in published and valid_source(path) and PurePosixPath(path).suffix.lower() in TEXT_TYPES:
-            local.append((path, key))
+        raise ValueError("The catalog does not use a pinned dsrc revision.")
+    if profile.key:
+        local = {role: repo for role, repo in profile.repositories.items()
+                 if repo.revision and not repo.github and role != "game-data"}
+        published = set()
+    else:
+        local = {"dsrc": SourceRepository(profile.legacy_game, "dsrc", revision),
+                 "src": SourceRepository(profile.legacy_game, "src", revision)}
+        published = SourceCatalog(revision).published_paths
+
     result = BytesIO()
-    with ZipFile(result, "w", compression=ZIP_DEFLATED, compresslevel=5) as zipfile:
-        zipfile.comment = revision.encode("ascii")
-        with subprocess.Popen(["git", "cat-file", "--batch"], cwd=ROOT, stdin=subprocess.PIPE,
-                              stdout=subprocess.PIPE) as child:
-            for path, key in local:
-                child.stdin.write(key + b"\n")
-                child.stdin.flush()
-                header = child.stdout.readline().split()
-                if len(header) != 3 or header[0] != key or header[1] != b"blob":
-                    raise ValueError(f"Cannot read pinned source {path}")
-                length = int(header[2])
-                data = child.stdout.read(length)
-                if len(data) != length or child.stdout.read(1) != b"\n":
-                    raise ValueError(f"Incomplete pinned source {path}")
-                zipfile.writestr(path, data)
-            child.stdin.close()
-            if child.wait():
-                raise ValueError("Game source excerpt export failed.")
-    return result.getvalue(), len(local)
+    count = 0
+    with ZipFile(result, "w", compression=ZIP_DEFLATED, compresslevel=5) as excerpts:
+        excerpts.comment = (profile.key or revision).encode("ascii")
+        for role, repo in local.items():
+            prefixes = ("sku.0",) if role == "dsrc" and not profile.key else ()
+            prefix = repo.subdirectory + "/" if repo.subdirectory else ""
+            selected = (
+                (path, oid) for name, oid in repo.tree(*prefixes)
+                if (path := role + "/" + name.removeprefix(prefix)) not in published
+                and valid_source(path) and PurePosixPath(path).suffix.lower() in TEXT_TYPES
+            )
+            for path, data in repo.blobs(selected):
+                excerpts.writestr(path, data)
+                count += 1
+    return result.getvalue(), count
 
 
 def install_notes(mode):
@@ -151,14 +167,14 @@ def write_package(path, mode, files, assets, database, db_checksum, identity, lo
     print(f"Writing {path.name}", flush=True)
     with ZipFile(pending, "x", compression=ZIP_DEFLATED, compresslevel=4) as bundle:
         bundle.write(database, ".local/catalog.sqlite3")
-        for name in ("serve.py", "deployment_assets.py", *(p.name for p in sorted(PROJECT.glob("catalog_*.py")))):
+        for name in ("serve.py", "archive_config.py", "deployment_assets.py",
+                     *(p.name for p in sorted(PROJECT.glob("catalog_*.py"))),
+                     *(p.relative_to(PROJECT).as_posix() for p in sorted((PROJECT / "archive_quests").glob("*.py")))):
             bundle.write(PROJECT / name, name)
         for name in sorted(ASSETS):
             bundle.write(PROJECT / "static" / name, f"static/{name}")
-        for helper in HELPERS:
-            bundle.write(ROOT / helper, f"game/{helper}")
-        bundle.writestr("game/dsrc/.archive-bundle", identity["revision"] + "\n")
-        bundle.write(UPSTREAM_INDEX, UPSTREAM_INDEX.name)
+        if not identity.get("source_key") and UPSTREAM_INDEX.is_file():
+            bundle.write(UPSTREAM_INDEX, UPSTREAM_INDEX.name)
         bundle.writestr("local_source_text.zip", local_sources, compress_type=ZIP_STORED)
         bundle.writestr("requirements.txt", f"Pillow=={version('Pillow')}\n")
         bundle.writestr("README.md", install_notes(mode))
@@ -178,42 +194,49 @@ def write_package(path, mode, files, assets, database, db_checksum, identity, lo
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--clientdata", type=Path, default=DEFAULT_CLIENT)
-    parser.add_argument("--client-tools", type=Path, default=DEFAULT_TOOLS)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    add_source_options(parser)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--trace", type=Path, help="Reuse an asset trace for this exact catalog and source files.")
     parser.add_argument("--snapshot", type=Path, action="append", default=[], help="Pinned SWG Source ZIP, repeatable.")
     parser.add_argument("--with-github", action="store_true", help="Also build a GitHub reference package.")
     args = parser.parse_args()
-    catalog = Catalog(args.database)
-    args.output.mkdir(parents=True, exist_ok=True)
-    identity, paths, audit = trace(catalog, args.clientdata.resolve(), args.client_tools.resolve(), args.trace)
-    audit_path = args.output / "baseline-viewer-audit.json"
+    try:
+        profile = select_profile(args)
+        catalog = Catalog(args.database or profile.database)
+        if catalog.metadata().get("source_key") != profile.key:
+            raise ValueError("Rebuild the catalog with the selected source configuration before packaging.")
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    output = args.output or profile.state / "deployments"
+    output.mkdir(parents=True, exist_ok=True)
+    identity, paths, audit = trace(catalog, profile, args.trace)
+    audit_path = output / "baseline-viewer-audit.json"
     write_report(audit_path, audit)
     snapshots = args.snapshot
-    if args.with_github and not snapshots:
+    if args.with_github and not snapshots and not profile.key:
         snapshots = sorted((PROJECT / ".local/model-recovery").glob("*.zip"))
     with ExitStack() as stack:
         upstream = UpstreamAssets(stack, snapshots, None) if snapshots else None
-        assets = describe_assets(paths, upstream)
+        published = github_assets(profile, paths) if args.with_github else ()
+        assets = describe_assets(paths, upstream, published)
+    if args.with_github and not any("github" in entry for entry in assets):
+        parser.error("No traced files matched a configured GitHub checkout or the supplied GitHub snapshots.")
     coverage = {"model_routes": audit["model_routes"], "model_status": audit["model_status"],
                 "map_images": sum(value is not None for value in audit["maps"].values()),
                 "resource_icons": sum(value is not None for value in audit["resource_icons"].values()),
                 "decoded_texture_variants": sum(value is not None for value in audit["textures"].values())}
-    source_zip, source_files = local_source_zip(identity["revision"])
+    source_zip, source_files = local_source_zip(identity["revision"], profile)
     db_checksum = file_hash(catalog.path)
     print(f"{len(assets):,} native files and {source_files:,} local source excerpts", flush=True)
-    bundle = args.output.resolve() / f"galactic-archive-{identity['revision'][:9]}.zip"
+    revision = identity.get("source_key", identity["revision"])
+    bundle = output.resolve() / f"galactic-archive-{revision[:9]}.zip"
     packages = [write_package(bundle, "bundled", paths, assets, catalog.path, db_checksum, identity, source_zip, coverage)]
     if args.with_github:
-        if not any("github" in entry for entry in assets):
-            raise ValueError("No selected native assets matched the supplied GitHub snapshots.")
         reference = bundle.with_name(bundle.stem + "-github.zip")
         packages.append(write_package(reference, "github", paths, assets, catalog.path, db_checksum, identity, source_zip, coverage))
     result = {"coverage": coverage, "native_files": len(assets), "native_bytes": sum(row["bytes"] for row in assets),
               "source_excerpt_files": source_files, "baseline_audit": str(audit_path.resolve()), "packages": packages}
-    write_report(args.output / "deployment-report.json", result)
+    write_report(output / "deployment-report.json", result)
     print(packed(result), flush=True)
 
 

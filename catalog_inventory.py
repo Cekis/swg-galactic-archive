@@ -4,7 +4,6 @@ from collections import Counter
 
 from catalog_entities import client_object_inventory, item_ref
 from catalog_item_scripts import ItemScripts, describe_storage
-from catalog_models import ModelLibrary
 from catalog_resources import load_resources
 from catalog_schematics import load_schematics
 from catalog_ships import load_ships
@@ -176,7 +175,7 @@ def publish_items(writer, items, craftable):
                             "crafted": ident in craftable, "acquisition": acquisitions, "form": form, "storage": storage})
 
 
-def publish_inventory(writer, files, strings, items, world, clientdata, client_tools):
+def publish_inventory(writer, files, strings, items, world, clientdata, models):
     inventory = client_object_inventory(clientdata)
     items.parse_templates()
     items.from_master()
@@ -184,10 +183,10 @@ def publish_inventory(writer, files, strings, items, world, clientdata, client_t
     items.from_acquisitions()
     components = items.from_ship_components()
     print("Indexing resources and original client icons", flush=True)
-    resources, icons = load_resources(files, strings, clientdata, ModelLibrary(clientdata, client_tools))
+    resources, icons = load_resources(files, strings, clientdata, models)
     print("Indexing schematic recipes and player ship chassis", flush=True)
     schematics = load_schematics(files, strings, clientdata, inventory)
-    ships = load_ships(files, strings, clientdata)
+    ships = load_ships(files, strings, clientdata, model=models)
     craftable = publish_schematics(writer, items, schematics, resources)
     ship_counts = publish_ships(writer, items, ships, schematics, components)
     publish_resources(writer, items, resources, world)

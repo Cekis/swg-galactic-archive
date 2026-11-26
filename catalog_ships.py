@@ -430,9 +430,9 @@ def _combined_sources(sources):
     return result
 
 
-def load_ships(files, strings, clientdata) -> dict[str, dict]:
+def load_ships(files, strings, clientdata, *, model=None) -> dict[str, dict]:
     """Return stable ship records with authored data and labeled client references."""
-    model = ModelLibrary(clientdata)
+    model = model or ModelLibrary(clientdata)
     templates = _template_records(files, strings, model)
     spawn_rows = _table(files, SPAWN_TABLE, "name")
     modifiers = _table(files, MODIFIER_TABLE, "strChassis")

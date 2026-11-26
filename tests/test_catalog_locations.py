@@ -11,7 +11,7 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 from catalog_locations import BUILDOUT, SERVER, LocationIndex, MapLibrary
-from manifest_sources import read_tab
+from archive_quests.manifest_sources import read_tab
 
 
 SERVER_TABLE = SERVER / "buildout/test_scene/city.tab"

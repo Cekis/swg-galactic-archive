@@ -5,19 +5,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from hashlib import sha256
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 from stat import S_ISREG
 from tempfile import NamedTemporaryFile
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from zipfile import ZipFile
+
+from archive_config import GIT_SHA, github_repository
 
 
 MANIFEST = "asset-manifest.json"
 ASSET_ROOTS = (".local/model-assets/", "clientdata/", "client-tools/", "game/data/")
-GITHUB_REPOS = {"mesh", "serverdata", "client-assets"}
-GIT_SHA = re.compile(r"[0-9a-f]{40}")
+LEGACY_SNAPSHOT_REPOS = {"mesh", "serverdata", "client-assets"}
 FILE_SHA = re.compile(r"[0-9a-f]{64}")
 FILE_NAME = re.compile(r"[a-zA-Z0-9_./ -]+")
 BLOCK = 256 * 1024
@@ -54,10 +57,10 @@ def asset_manifest(root):
 
 
 def github_source(source):
-    repo = source["repository"].removeprefix("SWG-Source/")
+    repo = github_repository(source["repository"])
     revision = source["revision"]
-    if repo not in GITHUB_REPOS or source["repository"] != f"SWG-Source/{repo}" or not GIT_SHA.fullmatch(revision):
-        raise ValueError("Invalid pinned SWG Source repository reference.")
+    if not isinstance(revision, str) or not GIT_SHA.fullmatch(revision):
+        raise ValueError("Invalid pinned GitHub revision.")
     return repo, revision, relative_path(source["path"]).as_posix()
 
 
@@ -110,9 +113,45 @@ def install_file(stream, target, entry):
 
 def download_file(target, entry):
     repo, revision, relative = github_source(entry["github"])
-    url = f"https://raw.githubusercontent.com/SWG-Source/{repo}/{revision}/{quote(relative)}"
-    with urlopen(url, timeout=30) as source:
+    url = f"https://raw.githubusercontent.com/{repo}/{revision}/{quote(relative)}"
+    try:
+        source = urlopen(url, timeout=30)
+    except HTTPError as error:
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if error.code not in (401, 403, 404) or not token:
+            raise
+        error.close()
+        request = Request(f"https://api.github.com/repos/{repo}/contents/{quote(relative)}?ref={revision}",
+                          headers={"Accept": "application/vnd.github.raw+json"})
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+        source = urlopen(request, timeout=30)
+    with source:
         install_file(source, target, entry)
+
+
+def cached_archive(cache, repository, revision):
+    owner, name = repository.split("/", 1)
+    pinned = f"{name}-{revision}.zip"
+    if cache is None:
+        return None
+    archive = cache / owner / pinned
+    if archive.is_file():
+        return archive
+    if owner == "SWG-Source" and name in LEGACY_SNAPSHOT_REPOS and (cache / pinned).is_file():
+        return cache / pinned
+    return None
+
+
+def zip_root(archive, repository, revision):
+    name = repository.split("/", 1)[1]
+    allowed = (f"{name}-{revision}", f"{repository.replace('/', '-')}-{revision[:7]}")
+    for entry in archive.infolist():
+        root = entry.filename.split("/", 1)[0]
+        if root:
+            if root not in allowed:
+                raise ValueError(f"Unexpected ZIP root for {repository} at {revision}.")
+            return root
+    raise ValueError(f"Empty ZIP for {repository} at {revision}.")
 
 
 def verify_or_install(root, cache=None, *, download=False, verify_bundled=True):
@@ -133,18 +172,19 @@ def verify_or_install(root, cache=None, *, download=False, verify_bundled=True):
             repo, revision, relative = github_source(entry["github"])
             key = repo, revision
             if key not in snapshots:
-                name = f"{repo}-{revision}.zip"
-                archive = cache / name if cache else None
-                if archive and archive.is_file():
-                    snapshots[key] = stack.enter_context(ZipFile(archive))
+                archive = cached_archive(cache, repo, revision)
+                if archive:
+                    snapshot = stack.enter_context(ZipFile(archive))
+                    snapshots[key] = snapshot, zip_root(snapshot, repo, revision)
                 elif download:
                     snapshots[key] = None
                 else:
-                    raise ValueError(f"Supply {name} in {cache}, or use --download.")
+                    raise ValueError(f"Supply {repo}-{revision}.zip under {cache}, or use --download.")
             if snapshots[key] is None:
                 remote.append((target, entry))
                 continue
-            with snapshots[key].open(f"{repo}-{revision}/{relative}") as stream:
+            snapshot, prefix = snapshots[key]
+            with snapshot.open(f"{prefix}/{relative}") as stream:
                 install_file(stream, target, entry)
             installed += 1
     if remote:

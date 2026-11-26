@@ -27,10 +27,10 @@ const dashboardSections = {
 };
 
 export function homePage(metadata, query, matches) {
-  const atlas = metadata.maps.tatooine;
-  const feature = atlas?.image ? `<a class="archive-feature" href="/locations/tatooine" aria-label="Open the Tatooine game map">
-      <img src="${h(atlas.image)}" alt="">
-      <span class="archive-feature-caption"><span><strong>Tatooine</strong><small>Explore the game map</small></span>
+  const atlas = worldMaps(metadata).find(world => world.chart?.image);
+  const feature = atlas ? `<a class="archive-feature" href="${atlas.url}" aria-label="Open the game map for ${h(atlas.name)}">
+      <img src="${h(atlas.chart.image)}" alt="">
+      <span class="archive-feature-caption"><span><strong>${h(atlas.name)}</strong><small>Explore the game map</small></span>
         <span class="archive-arrow" aria-hidden="true">→</span></span>
     </a>` : "";
   const collections = Object.entries(dashboardSections).map(([kind, detail]) =>
@@ -39,7 +39,13 @@ export function homePage(metadata, query, matches) {
         <span class="archive-count">${integer(metadata.counts[kind] ?? 0)}</span></span>
       <span class="archive-collection-detail">${h(detail)}</span>
     </a></li>`).join("");
-  const paths = [
+  const paths = metadata.source_key ? [
+    metadata.counts.quests && [href("quests"), "Find a quest"],
+    metadata.counts.items && [href("items") + "?acquisition=crafted", "Browse craftable items"],
+    metadata.counts.schematics && [href("schematics"), "Find crafting recipes"],
+    metadata.map_data?.buildings?.buildings && ["/locations?category=Building", "Explore building interiors"],
+    metadata.counts.ships && [href("ships"), "Explore player ships"],
+  ].filter(Boolean) : [
     [href("quests", "quest/purvis_kill_zealots") + "?view=chain", "Follow a quest chain"],
     [href("items") + "?acquisition=crafted", "Browse craftable items"],
     [href("resources", "steel") + "?view=schematics", "Find recipes that use steel"],
@@ -70,10 +76,10 @@ export function homePage(metadata, query, matches) {
       <h2 id="archive-sections-title">Browse the archive</h2>
       <ul class="archive-collections">${collections}</ul>
     </section>
-    <section class="archive-quick panel" aria-labelledby="archive-quick-title">
+    ${startingPoints ? `<section class="archive-quick panel" aria-labelledby="archive-quick-title">
       <h2 id="archive-quick-title">Start with a task</h2>
       <ul>${startingPoints}</ul>
-    </section>
+    </section>` : ""}
   </div>`;
 }
 
@@ -125,20 +131,29 @@ const featuredWorlds = [
   "kashyyyk_hunting", "kashyyyk_dead_forest", "kashyyyk_rryatt_trail",
 ];
 
-function worldMapCards(metadata) {
-  const cards = featuredWorlds.map(id => {
+function worldMaps(metadata) {
+  const otherWorlds = metadata.source_key ? Object.keys(metadata.locations) : [];
+  const ids = new Set([...featuredWorlds, ...otherWorlds]);
+  const worlds = [];
+  for (const id of ids) {
     const location = metadata.locations[id];
-    if (!location?.has_map) return "";
+    if (!location?.has_map || location.alias_for) continue;
     const scene = metadata.maps[location.map_id || (id === "kashyyyk" ? "kashyyyk_main" : id)];
     const chart = scene?.image ? scene : (scene?.regions || []).map(key => metadata.maps[key]).find(map => map?.image);
     const query = chart && chart !== scene ? "?" + new URLSearchParams({ chart: chart.id }) : "";
-    const thumbnail = chart?.image ? `<img src="${h(chart.image)}?thumbnail=1" alt="" loading="lazy" decoding="async">` : "";
-    return `<li><a class="world-card" href="${href("locations", id) + h(query)}">
-      ${thumbnail}<span class="world-card-label"><strong>${h(location.name)}</strong>
+    worlds.push({ name: location.name, chart, url: href("locations", id) + h(query) });
+  }
+  return worlds;
+}
+
+function worldMapCards(metadata) {
+  const cards = worldMaps(metadata).map(({ name, chart, url }) => `
+    <li><a class="world-card" href="${url}">
+      ${chart?.image ? `<img src="${h(chart.image)}?thumbnail=1" alt="" loading="lazy" decoding="async">` : ""}
+      <span class="world-card-label"><strong>${h(name)}</strong>
         <small>${chart ? "Game map" : "Coordinate map"}</small></span>
       <span class="world-card-arrow" aria-hidden="true">→</span>
-    </a></li>`;
-  }).join("");
+    </a></li>`).join("");
   return cards ? `<section class="world-directory" aria-labelledby="world-directory-title">
     <header><h2 id="world-directory-title">Major worlds and zones</h2><a href="#browse-results-title">Browse all locations ↓</a></header>
     <ul>${cards}</ul>
@@ -147,12 +162,12 @@ function worldMapCards(metadata) {
 
 export function browsePage(kind, filters, result, metadata) {
   const which = sections[kind];
-  const map = ["quests", "npcs"].includes(kind) ? metadata.maps.tatooine : null;
+  const map = ["quests", "npcs"].includes(kind) ? worldMaps(metadata).find(world => world.chart?.image) : null;
   const isLocations = kind === "locations";
   const worldCards = isLocations && result.page === 1 && ![filters.q, filters.scene, filters.category, filters.status].some(Boolean) ?
     worldMapCards(metadata) : "";
-  const heroArt = map?.image ? `<a class="hero-art" href="/locations/tatooine">
-    <img alt="" src="${h(map.image)}"><span class="hero-art-label"><strong>Tatooine ↗</strong><small>Game map</small></span></a>` : "";
+  const heroArt = map ? `<a class="hero-art" href="${map.url}">
+    <img alt="" src="${h(map.chart.image)}"><span class="hero-art-label"><strong>${h(map.name)} ↗</strong><small>Game map</small></span></a>` : "";
   const worlds = Object.entries(metadata.locations).filter(([, world]) => !isLocations || !world.alias_for)
     .sort(([, a], [, b]) => a.name.localeCompare(b.name));
   const worldNames = new Map();

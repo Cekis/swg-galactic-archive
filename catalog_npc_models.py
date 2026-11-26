@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import PurePosixPath
 import re
 
-from catalog_models import ModelLibrary, mob_template, normalize_ref
+from catalog_models import mob_template, normalize_ref
 from catalog_sources import SERVER, SERVER_OBJECTS, SHARED_OBJECTS
 
 
@@ -21,9 +21,9 @@ RENAMED_MOBILES = {
 
 
 class NpcModels:
-    def __init__(self, files, clientdata, client_tools):
+    def __init__(self, files, models):
         self.files = files
-        self.models = ModelLibrary(clientdata, client_tools)
+        self.models = models
         self.by_stem = defaultdict(set)
         self.space = {row.get("strIndex"): row for row in self._table(SERVER / "space_mobile/space_mobile.tab")}
         for directory in ("mobile", "creature"):

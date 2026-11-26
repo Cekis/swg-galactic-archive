@@ -30,8 +30,8 @@ def shrink_result(result):
 
 
 class AssetTrace(ModelLibrary):
-    def __init__(self, clientdata, tools, game, overlay):
-        super().__init__(clientdata, tools, (game / path for path in GAME_MODEL_PATHS), asset_overlay=overlay)
+    def __init__(self, clientdata, tools, game_data, overlay):
+        super().__init__(clientdata, tools, (game_data / path for path in GAME_MODEL_PATHS), asset_overlay=overlay)
         self.used = set()
         self.texture_results = {}
         self.animation_results = {}
@@ -82,7 +82,7 @@ def audit_routes(catalog, library, *, kind_filter=None, images=True):
     """Trace every default model route, NPC variant, map and resource icon."""
     model_results, map_results, resource_results = {}, {}, {}
     statuses, route_counts = Counter(), Counter()
-    inventory = {}
+    inventory, samples = {}, {}
     next_progress = 5_000
     with catalog.connect() as db:
         for kind, ident, raw in db.execute("""
@@ -107,6 +107,8 @@ def audit_routes(catalog, library, *, kind_filter=None, images=True):
                 statuses[status] += 1
                 model_results[identity] = checksum
                 route_counts[kind] += 1
+                if status == "available":
+                    samples.setdefault(kind, (ident, variant))
             if (count := len(model_results)) >= next_progress:
                 print(f"{kind_filter or 'Archive'}: {count:,} model routes checked", flush=True)
                 next_progress += 5_000
@@ -130,26 +132,27 @@ def audit_routes(catalog, library, *, kind_filter=None, images=True):
     report = {
         "models": model_results, "maps": map_results, "resource_icons": resource_results,
         "textures": library.texture_results, "model_status": dict(statuses), "model_routes": dict(route_counts),
+        "model_samples": samples,
     }
     print(f"{kind_filter or 'Archive'}: {len(model_results):,} model routes checked", flush=True)
     return report
 
 
-def _audit_job(database, client, tools, game, overlay, kind):
+def _audit_job(database, client, tools, game_data, overlay, kind):
     from catalog_db import Catalog
 
-    library = AssetTrace(client, tools, game, overlay)
+    library = AssetTrace(client, tools, game_data, overlay)
     report = audit_routes(Catalog(database), library, kind_filter=kind, images=kind == "ships")
     return report, library.used
 
 
-def audit_in_parallel(database, client, tools, game, overlay):
+def audit_in_parallel(database, client, tools, game_data, overlay):
     sections = ("items", "npcs", "locations", "ships")
-    report = {"models": {}, "maps": {}, "resource_icons": {}, "textures": {},
+    report = {"models": {}, "maps": {}, "resource_icons": {}, "textures": {}, "model_samples": {},
               "model_status": Counter(), "model_routes": Counter()}
     used = set()
     with ProcessPoolExecutor(max_workers=len(sections)) as pool:
-        jobs = [pool.submit(_audit_job, database, client, tools, game, overlay, kind) for kind in sections]
+        jobs = [pool.submit(_audit_job, database, client, tools, game_data, overlay, kind) for kind in sections]
         for job in jobs:
             part, files = job.result()
             used.update(files)
@@ -171,10 +174,10 @@ def compare_audits(expected, actual):
             raise ValueError(f"{len(changed):,} {category} outputs changed: {changed[:8]}")
 
 
-def asset_destinations(files, client, tools, game, overlay):
+def asset_destinations(files, client, tools, game_data, overlay):
     """Translate resolved source files to their same-priority package locations."""
     roots = ((overlay, Path(".local/model-assets")), (client, Path("clientdata")),
-             (tools, Path("client-tools")), (game, Path("game")))
+             (tools, Path("client-tools")), (game_data, Path("game/data")))
     output = {}
     for ref, path in sorted(files):
         for root, dest in roots:

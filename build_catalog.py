@@ -8,8 +8,11 @@ from pathlib import Path
 import re
 import tempfile
 
+from archive_config import SourceRepository, add_source_options, select_profile
+from archive_quests.manifest import manifest as generate_manifest
+
 from build_map_features import build_map_features
-from catalog_db import Writer
+from catalog_db import SCHEMA, Catalog, Writer
 from catalog_drops import index_drops
 from catalog_loot import index_npc_loot
 from catalog_dialogue import DialogueIndex
@@ -19,16 +22,15 @@ from catalog_location_hierarchy import LOCATION_ALIASES, canonical_location, pub
 from catalog_locations import LocationIndex
 from catalog_lore import add_location_descriptions, load_client_landmarks
 from catalog_map import LAYERS
+from catalog_models import ModelLibrary
 from catalog_npc_models import NpcModels
 from catalog_spawns import SpawnIndex
 from catalog_sources import (
-    DEFAULT_CLIENT, DEFAULT_TOOLS, PLANETS, PROJECT, ROOT, ClientStrings, GameFiles, display_id,
+    GAME_MODEL_PATHS, PLANETS, ROOT, ClientStrings, GameFiles, display_id,
     distinct, read_iff_table, string_ref,
 )
 
 
-MANIFEST = ROOT / "docs/quests/manifest.json"
-DEFAULT_DB = PROJECT / ".local/catalog.sqlite3"
 FAMILIES = {
     "ground": "Ground journal", "space": "Space mission", "legacy_static": "Static NPC",
     "legacy_theme_park": "Theme park", "legacy_epic": "Epic NPC", "legacy_random": "Random NPC",
@@ -357,19 +359,33 @@ def publish_npcs(writer, dialogue, npcs, items, areas, world):
                             "template": npc.get("template")})
 
 
-def write_catalog(writer, clientdata, client_tools):
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    files = GameFiles(manifest["source_revision"])
+def write_catalog(writer, profile):
+    clientdata, client_tools = profile.root("clientdata"), profile.root("client-tools")
     strings = ClientStrings(clientdata, client_tools)
     if not strings.roots:
-        raise ValueError(f"English strings not found in {clientdata} or {client_tools}")
+        raise ValueError(f"English STF files not found in {clientdata} or {client_tools}")
+    if profile.key:
+        print("Reading the configured game sources and generating the quest manifest", flush=True)
+        files = GameFiles(profile.repositories["dsrc"])
+        legacy_table = clientdata / "datatables/player/quests.iff"
+        manifest = generate_manifest(strings, files, legacy_table if legacy_table.is_file() else None,
+                                     profile.quest_annotations)
+        for role, repo in profile.repositories.items():
+            if repo.github and role != "game-data":
+                prefix = repo.subdirectory + "/" if repo.subdirectory else ""
+                writer.connection.executemany("INSERT INTO source_path VALUES (?,?)",
+                                              ((role + "/" + path.removeprefix(prefix), path) for path, _ in repo.tree()))
+    else:
+        game = profile.legacy_game
+        manifest = json.loads((game / "docs/quests/manifest.json").read_text(encoding="utf-8"))
+        files = GameFiles(SourceRepository(game, "dsrc", manifest["source_revision"]))
     strings.prefetch(ref[0] for record in manifest["quests"] if (key := record["title"].get("key"))
                      and (ref := string_ref(key)))
     print("Indexing authored placements and maps", flush=True)
     spatial = LocationIndex(files, clientdata)
     npcs = load_npcs(files, strings, spatial)
     items = Items(files, strings)
-    places, world = load_places(files, strings, spatial)
+    places, world = load_places(files, strings, spatial, include_known_worlds=not profile.key)
     print("Tracing creature spawners, spawn tables and scripts", flush=True)
     spawns = SpawnIndex(files, spatial, npcs, places).build()
     for point, config, _, template in spawns.records:
@@ -389,7 +405,9 @@ def write_catalog(writer, clientdata, client_tools):
     legacy = legacy_descriptions(manifest, clientdata, strings)
     origin_count = collect_quests(writer, files, strings, spatial, manifest, dialogue, npcs, items, world, legacy)
     print("Resolving NPC model templates against the game client", flush=True)
-    model_coverage = NpcModels(files, clientdata, client_tools).index(npcs)
+    models = ModelLibrary(clientdata, client_tools, (profile.root("game-data") / path for path in GAME_MODEL_PATHS),
+                          asset_overlay=profile.overlay)
+    model_coverage = NpcModels(files, models).index(npcs)
     publish_npcs(writer, dialogue, npcs, items, areas, world)
     for template, config in spatial.scripted_spawn_definitions():
         items.ensure(template)
@@ -397,7 +415,7 @@ def write_catalog(writer, clientdata, client_tools):
             if entry["npc"]:
                 writer.link("npcs", entry["npc"], "spawners", "items", template, config)
     print("Indexing item definitions, client templates and acquisition tables", flush=True)
-    inventory = publish_inventory(writer, files, strings, items, world, clientdata, client_tools)
+    inventory = publish_inventory(writer, files, strings, items, world, clientdata, models)
     index_npc_loot(writer.connection, files)
     print("Calculating creature and space loot chances", flush=True)
     loot_coverage = index_drops(writer.connection, files, items, npcs, spawns)
@@ -428,7 +446,8 @@ def write_catalog(writer, clientdata, client_tools):
                        "map_id": (place.get("map") or {}).get("id"),
                        **({"alias_for": LOCATION_ALIASES[ident]} if ident in LOCATION_ALIASES else {})}
                for ident, place in sorted(places.items()) if place["scene"] == ident}
-    return writer.finish({**inventory, "title": "Star Wars Galaxies Galactic Archive", "revision": files.revision,
+    provenance = {"source_key": profile.key, "sources": profile.metadata()} if profile.key else {}
+    return writer.finish({**inventory, **provenance, "title": "Star Wars Galaxies Galactic Archive", "revision": files.revision,
                           "quest_source_counts": manifest["counts"], "origin_scene_records": origin_count,
                           "locations": filters, "maps": spatial.maps, "map_layers": LAYERS, "map_data": map_data,
                           "dialogue": dict(dialogue_stats),
@@ -442,13 +461,13 @@ def write_catalog(writer, clientdata, client_tools):
                           "systems": manifest.get("other_quest_systems", [])}, spawns)
 
 
-def build(path, clientdata, client_tools):
+def build(path, profile):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="index-", dir=path.parent) as work:
         candidate = Path(work) / "catalog.sqlite3"
         writer = Writer(candidate)
         try:
-            metadata = write_catalog(writer, clientdata, client_tools)
+            metadata = write_catalog(writer, profile)
         finally:
             writer.connection.close()
         candidate.replace(path)
@@ -457,11 +476,19 @@ def build(path, clientdata, client_tools):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--clientdata", type=Path, default=DEFAULT_CLIENT)
-    parser.add_argument("--client-tools", type=Path, default=DEFAULT_TOOLS)
+    add_source_options(parser)
+    parser.add_argument("--if-needed", action="store_true", help="Reuse a catalog built from the selected sources.")
     args = parser.parse_args()
-    metadata = build(args.database, args.clientdata, args.client_tools)
+    try:
+        profile = select_profile(args)
+        database = args.database or profile.database
+        if args.if_needed and database.is_file():
+            recorded = Catalog(database).metadata()
+            if recorded.get("source_key") == profile.key and recorded.get("schema") == SCHEMA:
+                return
+        metadata = build(database, profile)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     print(json.dumps({key: metadata[key] for key in ("counts", "inventory", "dialogue", "map_data")}, indent=2))
 
 

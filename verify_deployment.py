@@ -12,10 +12,12 @@ import subprocess
 import sys
 from threading import Thread
 from urllib.parse import urlencode
-from urllib.request import ProxyHandler, build_opener
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
 from zipfile import ZipFile
 
-from catalog_sources import PROJECT
+from archive_config import PROJECT
+from catalog_db import Catalog
 from deployment_assets import BLOCK, MANIFEST, asset_manifest, relative_path, verify_or_install
 from deployment_trace import audit_in_parallel, compare_audits
 from recover_item_models import write_report
@@ -63,8 +65,62 @@ def serve_environment():
     return env
 
 
-def http_smoke(stage, icon_class):
-    opener = build_opener(ProxyHandler({}))
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+def verify_selected_routes(stage, catalog, read, expected):
+    """Choose representative routes from this package's viewer audit."""
+    maps, icons, models = {}, {}, {}
+    if sample := next((key.split("|", 1)[0] for key, checksum in expected["maps"].items() if checksum), None):
+        for view, options in (("full", {}), ("thumbnail", {"thumbnail": "1"})):
+            identity = f"{sample}|{view}"
+            if expected_hash := expected["maps"].get(identity):
+                actual = sha256(read(f"/api/map/{sample}/image", **options)).hexdigest()
+                if actual != expected_hash:
+                    raise ValueError(f"Map output changed for {identity}.")
+                maps[identity] = actual
+    if sample := next((name for name, checksum in expected["resource_icons"].items() if checksum), None):
+        actual = sha256(read("/api/resource-image", **{"class": sample})).hexdigest()
+        if actual != expected["resource_icons"][sample]:
+            raise ValueError(f"Resource icon changed for {sample}.")
+        icons[sample] = actual
+    kinds = {"items": "item", "npcs": "npc", "locations": "building", "ships": "ship"}
+    for kind, (ident, variant) in expected.get("model_samples", {}).items():
+        params = {kinds[kind]: ident}
+        if variant:
+            params["variant"] = variant
+        model = json.loads(read("/api/model", **params))
+        if model["status"] != "available" or not (model.get("triangles", 0) or model.get("sprite_image")):
+            raise ValueError(f"Model preview unavailable for {kind}/{ident}.")
+        models[kind] = {"triangles": model.get("triangles"), "textures": len(model.get("textures", {})),
+                        "animations": len(model.get("animations", ()))}
+    with ZipFile(stage / "local_source_text.zip") as archive:
+        local = next((path for path in archive.namelist() if archive.getinfo(path).file_size), None)
+    if local and b"source-excerpt" not in read("/source", path=local, line="1"):
+        raise ValueError(f"Local source excerpt unavailable for {local}.")
+    with catalog.connect() as db:
+        published = db.execute("SELECT path FROM source_path ORDER BY path LIMIT 1").fetchone()
+    if published:
+        try:
+            read("/source", path=published[0])
+        except HTTPError as error:
+            with error:
+                target = error.headers.get("Location", "")
+                if error.code != 302 or not target.startswith("https://github.com/"):
+                    raise
+                location = target
+        else:
+            raise ValueError("Published source route did not redirect to GitHub.")
+    else:
+        location = None
+    return {"maps": maps, "resource_icons": icons, "models": models, "local_source": local, "github_source": location}
+
+
+def http_smoke(stage, expected):
+    opener = build_opener(ProxyHandler({}), NoRedirect)
+    catalog = Catalog(stage / ".local/catalog.sqlite3")
     stderr = stage.parent / (stage.name + ".stderr.log")
     with stderr.open("wb") as log, subprocess.Popen(
         serve_command(), cwd=stage, env=serve_environment(), stdout=subprocess.PIPE, stderr=log,
@@ -92,6 +148,12 @@ def http_smoke(stage, icon_class):
             assert json.loads(read("/api/health"))["status"] == "ready"
             assert b"Galactic Archive" in read("/")
             assert b"mountModelViewer" in read("/model-viewer.js")
+            if catalog.metadata().get("source_key"):
+                rendered = verify_selected_routes(stage, catalog, read, expected)
+                print(f"{stage.name}: unpacked HTTP routes passed", flush=True)
+                return rendered
+
+            icon_class = next(name for name, checksum in expected["resource_icons"].items() if checksum)
             raw_map = read("/api/map/tatooine/image")
             assert raw_map.startswith(b"\x89PNG\r\n\x1a\n")
             assert read("/api/map/tatooine/image", thumbnail="1").startswith(b"\x89PNG")
@@ -130,7 +192,7 @@ def http_smoke(stage, icon_class):
 
 def unpacked_audit(stage, expected):
     results, _ = audit_in_parallel(stage / ".local/catalog.sqlite3", stage / "clientdata",
-                                   stage / "client-tools", stage / "game", stage / ".local/model-assets")
+                                   stage / "client-tools", stage / "game/data", stage / ".local/model-assets")
     compare_audits(expected, results)
     return results
 
@@ -145,15 +207,15 @@ def compatible_manifests(first, second):
         raise ValueError("Portable and GitHub packages contain different native file sets.")
 
 
-def verify_reference(package, github, cache, manifest, count, icon, bundle_http):
+def verify_reference(package, github, cache, manifest, count, expected, bundle_http, download):
     external = extract_package(package, github)
     compatible_manifests(manifest, external)
     attempt = subprocess.run(serve_command(), cwd=github, env=serve_environment(), capture_output=True,
                              check=False, timeout=10)
     assert attempt.returncode == 2 and b"Install GitHub-referenced assets" in attempt.stderr
-    found, restored = verify_or_install(github, cache, verify_bundled=False)
+    found, restored = verify_or_install(github, cache, download=download, verify_bundled=False)
     assert found == count and restored == sum(not entry["bundled"] for entry in external["assets"])
-    assert http_smoke(github, icon) == bundle_http
+    assert http_smoke(github, expected) == bundle_http
     return {"github_bundle": str(package.resolve()), "github_installed": restored}
 
 
@@ -162,6 +224,7 @@ def main():
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--github-bundle", type=Path)
     parser.add_argument("--snapshot-dir", type=Path, default=PROJECT / ".local/model-recovery")
+    parser.add_argument("--download", action="store_true", help="Fetch referenced assets that aren't in the ZIP cache.")
     parser.add_argument("--audit", type=Path, help="Original viewer audit generated by build_deployment.py.")
     parser.add_argument("--work", type=Path, required=True, help="New folder for the extracted verification packages.")
     args = parser.parse_args()
@@ -169,16 +232,15 @@ def main():
     work.mkdir(parents=True)
     expected_path = args.audit or args.bundle.parent / "baseline-viewer-audit.json"
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
-    icon = next(name for name, checksum in expected["resource_icons"].items() if checksum)
     bundled = work / "bundled"
     manifest = extract_package(args.bundle, bundled)
     count = len(manifest["assets"])
-    bundle_http = http_smoke(bundled, icon)
+    bundle_http = http_smoke(bundled, expected)
     with ThreadPoolExecutor(max_workers=1) as verification:
         reference = None
         if args.github_bundle:
             reference = verification.submit(verify_reference, args.github_bundle, work / "github",
-                                            args.snapshot_dir.resolve(), manifest, count, icon, bundle_http)
+                                            args.snapshot_dir.resolve(), manifest, count, expected, bundle_http, args.download)
         results = unpacked_audit(bundled, expected)
         supplemental = reference.result() if reference else {}
     verified = {"bundle": str(args.bundle.resolve()), "installed_assets": count, "http": bundle_http,

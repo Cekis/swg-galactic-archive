@@ -2,48 +2,17 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import math
-import os
 from pathlib import Path, PurePosixPath
 import re
-import subprocess
-import sys
-import tarfile
 import struct
 
-PROJECT = Path(__file__).resolve().parent
+from archive_config import PROJECT
+from archive_quests.manifest_scripts import Script, arguments, literal, script_paths
+from archive_quests.manifest_sources import Files, PLANETS, ROOT, SERVER, SHARED, SCRIPTS, read_stf, source
+from catalog_iff import read_iff_table
 
 
-def game_root():
-    configured = os.environ.get("SWG_GAME_ROOT")
-    candidates = (Path(configured).expanduser(),) if configured else (
-        PROJECT / "game", PROJECT.parent / "whitengold-ai" / "whitengold", PROJECT.parent,
-    )
-    for candidate in candidates:
-        if (candidate / "dsrc").is_dir() and (candidate / "devtools/quests/manifest_sources.py").is_file():
-            return candidate.resolve()
-    raise RuntimeError("Set SWG_GAME_ROOT to the SWG checkout containing dsrc and the quest manifest tools.")
-
-
-def asset_root(environment, directory):
-    if configured := os.environ.get(environment):
-        return Path(configured).expanduser().resolve()
-    if ROOT == PROJECT / "game":
-        return PROJECT / directory
-    return next((parent / directory for parent in (PROJECT, PROJECT.parent, *ROOT.parents)
-                 if (parent / directory).is_dir()), PROJECT.parent / directory)
-
-
-ROOT = game_root()
-DEFAULT_CLIENT = asset_root("SWG_CLIENTDATA", "clientdata")
-DEFAULT_TOOLS = asset_root("SWG_CLIENT_TOOLS", "client-tools")
-GAME_MODEL_PATHS = ("data/sku.0/sys.shared/compiled/game", "data/sku.0/sys.client/built/game")
-
-sys.path.insert(0, str(ROOT / "devtools/quests"))
-from manifest_sources import Files, PLANETS, SERVER, SHARED, SCRIPTS, read_stf, source
-from manifest_scripts import Script, arguments, literal, script_paths
-
-sys.path.insert(0, str(ROOT / "devtools/docker"))
-from validate_resource_distribution import table as read_iff_table
+GAME_MODEL_PATHS = ("sku.0/sys.shared/compiled/game", "sku.0/sys.client/built/game")
 
 
 SERVER_OBJECTS = SERVER.parent / "object"
@@ -55,21 +24,18 @@ STRING_ID = re.compile(r"@?([a-zA-Z0-9_./\\-]+):([a-zA-Z0-9_./-]+)")
 
 
 class GameFiles(Files):
-    def __init__(self, revision):
-        self.revision = revision
-        self.blobs = {}
-        resource_paths = {source(path)["path"] for path in RESOURCE_TABLES}
+    def __init__(self, repository):
+        super().__init__({}, repository.revision)
         roots = (SERVER, SHARED, SCRIPTS, SERVER_OBJECTS, SHARED_OBJECTS)
-        command = ["git", "archive", "--format=tar", revision, "--", *(source(path)["path"] for path in roots)]
-        with subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE) as child:
-            with tarfile.open(fileobj=child.stdout, mode="r|") as archive:
-                for member in archive:
-                    if member.isfile() and (PurePosixPath(member.name).suffix.lower() in ACCEPTED_TEXT
-                                            or member.name in resource_paths):
-                        with archive.extractfile(member) as stream:
-                            self.blobs[member.name] = stream.read()
-            if child.wait():
-                raise RuntimeError(f"Cannot read game sources at {revision}")
+        resource_paths = {source(path)["path"] for path in RESOURCE_TABLES}
+        prefix = repository.subdirectory + "/" if repository.subdirectory else ""
+        selected = repository.tree(*(path.relative_to("dsrc").as_posix() for path in roots))
+        logical_entries = (("dsrc/" + name.removeprefix(prefix), oid) for name, oid in selected)
+        readable_entries = ((name, oid) for name, oid in logical_entries
+                            if name in resource_paths or PurePosixPath(name).suffix.lower() in ACCEPTED_TEXT)
+        self.blobs.update(repository.blobs(readable_entries))
+        if not self.blobs:
+            raise ValueError("dsrc has no tracked sku.0 server/shared datatables, scripts or object templates at the selected revision.")
 
 
 def clean_table_name(value):
@@ -92,23 +58,23 @@ class ClientStrings:
 
     def __init__(self, clientdata, client_tools):
         candidates = [
-            ("client-tools", client_tools / name) for name in (
+            ("client-tools", client_tools, name) for name in (
                 "string/en", "data/string/en", "data/sku.0/sys.shared/built/game/string/en",
                 "data/sku.0/sys.client/built/game/string/en",
             )
         ]
-        candidates.append(("clientdata", clientdata / "string/en"))
-        self.roots = [(label, path) for label, path in candidates if path.is_dir()]
+        candidates.append(("clientdata", clientdata, "string/en"))
+        self.roots = [(label, base, base / name) for label, base, name in candidates if (base / name).is_dir()]
         self.cache = {}
         self.errors = {}
 
     def _read(self, table):
         relative = PurePosixPath(table + ".stf")
         problem = None
-        for label, root in self.roots:
+        for label, base, root in self.roots:
             path = root / relative
             try:
-                return read_stf(path), f"{label}/string/en/{relative.as_posix()}", problem
+                return read_stf(path), f"{label}/{path.relative_to(base).as_posix()}", problem
             except FileNotFoundError:
                 continue
             except (ValueError, OSError, struct.error) as error:
@@ -148,9 +114,27 @@ class ClientStrings:
     def name(self, table, key):
         return self.table(table)[0].get(key.lower())
 
+    def prefetch_labels(self, labels):
+        self.prefetch(ref[0] for label in labels if label.startswith("@") and (ref := string_ref(label)))
+
+    def label(self, value):
+        if not value.startswith("@"):
+            return {"text": value or None}
+        resolved = self.lookup(value)
+        result = {"key": value, "text": resolved.get("text")}
+        if resolved.get("asset"):
+            result["asset"] = resolved["asset"]
+        return result
+
+    def npc(self, ident):
+        for table in ("mob/creature_names", "npc_name"):
+            if ident and (label := self.label(f"@{table}:{ident}"))["text"]:
+                return {"id": ident, **label}
+        return {"id": ident, "text": None}
+
     def conversation_names(self):
         names = set()
-        for _, root in self.roots:
+        for _, _, root in self.roots:
             for directory in root.iterdir():
                 if not directory.is_dir() or (directory.name not in (
                     "conversation", "static_npc", "random_quest", "epic_quest", "npc_mission",

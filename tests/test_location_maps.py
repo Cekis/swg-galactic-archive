@@ -98,7 +98,10 @@ class ClientCoordinateTests(unittest.TestCase):
 class LocationMapAcceptance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.catalog = Catalog(PROJECT / ".local/catalog.sqlite3")
+        database = PROJECT / ".local/catalog.sqlite3"
+        if not database.is_file():
+            raise unittest.SkipTest("The original map catalog fixture is unavailable.")
+        cls.catalog = Catalog(database)
 
     def test_landmark_has_the_client_text_and_a_pin_linking_to_its_page(self):
         ident = "tatooine/poi/forttusken"

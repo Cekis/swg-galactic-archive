@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from catalog_schematics import load_schematics
 from catalog_sources import SCRIPTS, SERVER, SERVER_OBJECTS, SHARED, SHARED_OBJECTS
-from manifest_sources import read_tab
+from archive_quests.manifest_sources import read_tab
 
 
 class MockFiles:

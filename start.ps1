@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [int]$Port = 8768,
+    [Alias('Sources')]
+    [string]$SourcesConfig,
     [string]$GameRoot,
     [string]$ClientData,
     [string]$ClientTools,
@@ -10,15 +12,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ($GameRoot) { $env:SWG_GAME_ROOT = (Resolve-Path -LiteralPath $GameRoot).Path }
-$database = Join-Path $PSScriptRoot '.local/catalog.sqlite3'
 $assetArgs = @()
+if ($SourcesConfig) { $assetArgs += @('--sources', (Resolve-Path -LiteralPath $SourcesConfig).Path) }
 if ($ClientData) { $assetArgs += @('--clientdata', (Resolve-Path -LiteralPath $ClientData).Path) }
 if ($ClientTools) { $assetArgs += @('--client-tools', (Resolve-Path -LiteralPath $ClientTools).Path) }
 
-if ($Rebuild -or -not (Test-Path -LiteralPath $database -PathType Leaf)) {
-    & python -B (Join-Path $PSScriptRoot 'build_catalog.py') @assetArgs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-}
+$buildArgs = $assetArgs
+if (-not $Rebuild) { $buildArgs += '--if-needed' }
+& python -B (Join-Path $PSScriptRoot 'build_catalog.py') @buildArgs
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $serveScript = Join-Path $PSScriptRoot 'serve.py'
 if ($Background) {
     $pythonPath = Get-Command python -CommandType Application -All | Select-Object -First 1 -ExpandProperty Source

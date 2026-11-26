@@ -6,20 +6,19 @@ from hashlib import blake2s
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import mimetypes
-from pathlib import Path
 import re
 from urllib.parse import parse_qs, urlsplit
 
+from archive_config import PROJECT, add_source_options, select_profile
 from catalog_db import BROWSE_SORT, DIALOGUE_SORT, PLACEMENT_SORT, Catalog, KINDS, SCHEMA, packed
 from catalog_locations import MapLibrary
 from catalog_map import AREA_LAYERS, LAYERS, bounds_from_query
 from catalog_model_previews import render_model_profile
 from catalog_models import ModelLibrary
 from catalog_provenance import SourceCatalog, valid_source
-from catalog_sources import DEFAULT_CLIENT, DEFAULT_TOOLS, GAME_MODEL_PATHS, PROJECT, ROOT
+from catalog_sources import GAME_MODEL_PATHS
 
 
-DEFAULT_DB = PROJECT / ".local/catalog.sqlite3"
 DEFAULT_PORT = 8768
 STATIC = PROJECT / "static"
 ASSETS = {"index.html", "site.css", "app.js", "ui.js", "views.js", "inventory-views.js",
@@ -50,13 +49,13 @@ def normalize_int(value, default, lower, upper):
 class ArchiveServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, catalog, clientdata, client_tools):
+    def __init__(self, address, catalog, profile):
         super().__init__(address, ArchiveHandler)
         self.catalog = catalog
         stat = catalog.path.stat()
         self.catalog_signature = (stat.st_mtime_ns, stat.st_size)
         self.meta = catalog.meta()
-        self.sources = SourceCatalog(self.meta["revision"])
+        self.sources = SourceCatalog(self.meta["revision"], catalog=catalog, profile=profile)
         self.meta["map_layers"] = {**LAYERS, **AREA_LAYERS}
         for chart in self.meta["maps"].values():
             scene = chart["scene"]
@@ -65,9 +64,11 @@ class ArchiveServer(ThreadingHTTPServer):
                 chart["grid_area_layers"] = catalog.map_area_counts(scene, chart["grid_bounds"])
             if chart.get("cities"):
                 chart["cities"] = catalog.with_map_details(scene, chart["cities"])
+        clientdata, client_tools = profile.root("clientdata"), profile.root("client-tools")
         self.maps = MapLibrary(clientdata)
-        self.models = ModelLibrary(clientdata, client_tools, (ROOT / path for path in GAME_MODEL_PATHS),
-                                   asset_overlay=PROJECT / ".local/model-assets")
+        self.models = ModelLibrary(clientdata, client_tools,
+                                   (profile.root("game-data") / path for path in GAME_MODEL_PATHS),
+                                   asset_overlay=profile.overlay)
 
     def version(self):
         return archive_version(STATIC, self.catalog_signature)
@@ -276,22 +277,27 @@ class ArchiveHandler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--clientdata", type=Path, default=DEFAULT_CLIENT)
-    parser.add_argument("--client-tools", type=Path, default=DEFAULT_TOOLS)
+    add_source_options(parser)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
-    if (PROJECT / "asset-manifest.json").is_file():
-        from deployment_assets import missing_reference_assets
+    packaged = (PROJECT / "asset-manifest.json").is_file()
+    try:
+        profile = select_profile(args, packaged=packaged)
+        if packaged:
+            from deployment_assets import missing_reference_assets
 
-        if missing_reference_assets(PROJECT):
-            parser.error("Install GitHub-referenced assets with python deployment_assets.py --download.")
-    if not args.database.is_file():
-        parser.error("Run build_catalog.py to create the local index before starting the server.")
-    catalog = Catalog(args.database)
-    if catalog.meta().get("schema") != SCHEMA:
-        parser.error("Rebuild the catalog for the current schema.")
-    with ArchiveServer(("127.0.0.1", args.port), catalog, args.clientdata, args.client_tools) as server:
+            if missing_reference_assets(PROJECT):
+                parser.error("Install GitHub-referenced assets with python deployment_assets.py --download.")
+        database = args.database or profile.database
+        if not database.is_file():
+            parser.error("Run build_catalog.py with the selected source configuration before starting the server.")
+        catalog = Catalog(database)
+        metadata = catalog.metadata()
+        if metadata.get("schema") != SCHEMA or (not packaged and metadata.get("source_key") != profile.key):
+            parser.error("Rebuild the catalog with build_catalog.py for the current source configuration.")
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    with ArchiveServer(("127.0.0.1", args.port), catalog, profile) as server:
         print(f"Local: http://127.0.0.1:{server.server_port}/", flush=True)
         try:
             server.serve_forever()

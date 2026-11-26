@@ -6,14 +6,14 @@ import io
 import math
 import re
 import struct
-import sys
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from catalog_sources import ROOT, SERVER, SHARED
+from catalog_sources import ROOT, SERVER, SHARED, read_iff_table
+from catalog_iff import block_positions, form
 
 BUILDOUT = SHARED / "buildout"
 ASSET_NAME = re.compile(r"[a-z0-9_/-]+", re.ASCII)
@@ -993,13 +993,8 @@ class LocationIndex:
         path = self._client_asset(key)
         if not path:
             return ()
-        # Reuse the checked-in DTII reader used to audit buildout and CRC assets.
-        directory = str(ROOT / "devtools/docker")
-        if directory not in sys.path:
-            sys.path.insert(0, directory)
-        from validate_resource_distribution import table
         try:
-            return table(path)[2]
+            return read_iff_table(path)[2]
         except (ValueError, OSError, AssertionError, KeyError, struct.error):
             return ()
 
@@ -1084,12 +1079,8 @@ def _region_center(bounds):
 
 def _portal_cells(path):
     """Read named portal cells from the local POB using its original hierarchy."""
-    directory = str(ROOT / "devtools/docker")
-    if directory not in sys.path:
-        sys.path.insert(0, directory)
-    from audit_terminal_snapshots import blocks, form
     data = path.read_bytes()
-    root, children = form(data, *list(blocks(data))[0])
+    root, children = form(data, *next(block_positions(data)))
     if root != b"PRTO":
         return None
     _, children = form(data, *children[0])

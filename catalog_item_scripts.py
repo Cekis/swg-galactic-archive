@@ -10,7 +10,7 @@ import re
 from catalog_entities import item_ref
 from catalog_loot import LootTables
 from catalog_sources import SERVER, SHARED, SCRIPTS, arguments, script_paths, source
-from manifest_scripts import COMMENT, METHOD, QUOTED, balanced_end, literal
+from archive_quests.manifest_scripts import COMMENT, METHOD, QUOTED, balanced_end, literal
 
 
 # The native overloads live in script/base_class.java. The qualified helpers

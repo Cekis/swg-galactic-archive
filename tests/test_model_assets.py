@@ -16,7 +16,8 @@ sys.path.insert(0, str(PROJECT))
 
 from catalog_model_previews import render_inventory_model
 from catalog_models import Chunk, ModelError, ModelLibrary, chunks, expand_quaternion, shader_alpha, version
-from catalog_sources import DEFAULT_CLIENT
+from archive_config import legacy_asset
+
 from recover_item_models import ClientTree
 
 
@@ -104,7 +105,7 @@ class DecoderTests(unittest.TestCase):
 class SuppliedAssetsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        clientdata = DEFAULT_CLIENT
+        clientdata = legacy_asset("clientdata", "SWG_CLIENTDATA")
         if not (clientdata / "object/mobile/shared_watto.iff").is_file():
             raise unittest.SkipTest("Point SWG_CLIENTDATA at the supplied extracted client assets.")
         cls.library = ModelLibrary(clientdata)

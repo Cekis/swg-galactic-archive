@@ -9,7 +9,7 @@ import subprocess
 from urllib.parse import quote
 from zipfile import BadZipFile, ZipFile
 
-from catalog_sources import PROJECT, ROOT
+from archive_config import PROJECT, github_repository, legacy_game
 
 
 UPSTREAM_INDEX = PROJECT / "upstream_source_index.json.gz"
@@ -28,12 +28,19 @@ def valid_source(path):
 
 
 class SourceCatalog:
-    def __init__(self, revision, index=UPSTREAM_INDEX):
+    def __init__(self, revision, index=UPSTREAM_INDEX, *, catalog=None, profile=None):
         self.revision = revision
+        self.catalog = catalog
+        metadata = catalog.metadata() if catalog else {}
+        self.source_key = metadata.get("source_key")
+        self.repositories = metadata.get("sources", {})
+        self.profile = profile
         self.local_text = index.with_name("local_source_text.zip")
         self.published_revision = None
         self.published_paths = set()
         self.matching_paths = set()
+        if self.source_key:
+            return
         try:
             with gzip.open(index, "rt", encoding="utf-8") as stream:
                 published = json.load(stream)
@@ -47,14 +54,25 @@ class SourceCatalog:
                 self.matching_paths = set(published.get("matching_paths", ()))
 
     def github(self, path, line=None):
-        if path not in self.published_paths or not valid_source(path):
+        if not valid_source(path):
+            return None
+        if self.source_key:
+            role = path.split("/", 1)[0]
+            repo = self.repositories.get(role, {})
+            if repo.get("github") and HASH.fullmatch(repo.get("revision") or "") and (remote := self.catalog.source_path(path)):
+                path_is_text = PurePosixPath(path).suffix.lower() in TEXT_TYPES
+                anchor = f"#L{line}" if line and role == "dsrc" and path_is_text else ""
+                return f"https://github.com/{github_repository(repo['github'])}/blob/{repo['revision']}/{quote(remote)}{anchor}"
+            return None
+        if path not in self.published_paths:
             return None
         anchor = f"#L{line}" if line and path in self.matching_paths and PurePosixPath(path).suffix.lower() in TEXT_TYPES else ""
         return f"https://github.com/{PUBLISHED_REPOSITORY}/blob/{self.published_revision}/{quote(path)}{anchor}"
 
     def excerpt(self, path, line=None):
-        if (not valid_source(path) or not path.startswith(("dsrc/sku.0/", "src/"))
-                or PurePosixPath(path).suffix.lower() not in TEXT_TYPES or not HASH.fullmatch(self.revision)):
+        if (not valid_source(path) or PurePosixPath(path).suffix.lower() not in TEXT_TYPES
+                or not HASH.fullmatch(self.revision)
+                or (not self.source_key and not path.startswith(("dsrc/sku.0/", "src/")))):
             return ()
         source = self._source_text(path)
         if source is None:
@@ -70,13 +88,20 @@ class SourceCatalog:
         if self.local_text.is_file():
             try:
                 with ZipFile(self.local_text) as archive:
-                    if archive.comment == self.revision.encode("ascii"):
+                    if archive.comment == (self.source_key or self.revision).encode("ascii"):
                         return archive.read(path)
             except (OSError, BadZipFile, KeyError):
                 pass
             return None
+        if self.source_key:
+            role, relative = path.split("/", 1)
+            repo = self.profile.repositories.get(role) if self.profile else None
+            return repo.read(relative) if repo else None
+        game = self.profile.legacy_game if self.profile else legacy_game()
+        if game is None:
+            return None
         try:
-            result = subprocess.run(["git", "cat-file", "blob", f"{self.revision}:{path}"], cwd=ROOT,
+            result = subprocess.run(["git", "cat-file", "blob", f"{self.revision}:{path}"], cwd=game,
                                     capture_output=True, timeout=8, check=True)
         except (OSError, subprocess.SubprocessError):
             return None
@@ -92,9 +117,12 @@ class SourceCatalog:
             ) + "</pre>"
         else:
             content = '<p class="muted">Local archive reference. A text excerpt is unavailable for this record.</p>'
+        role = path.split("/", 1)[0]
+        revision = self.repositories.get(role, {}).get("revision") if self.source_key else self.revision
+        provenance = f'<p class="muted">Source revision {escape(revision[:9])}</p>' if revision else ""
         return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
                 f'<meta name="viewport" content="width=device-width, initial-scale=1">'
                 f'<title>Local source · Galactic Archive</title><link rel="stylesheet" href="/site.css"></head>'
                 f'<body><main class="app-shell"><section class="panel"><h1>Local source</h1>'
-                f'<p><code>{escape(label)}</code></p><p class="muted">Game source {escape(self.revision[:9])}</p>'
+                f'<p><code>{escape(label)}</code></p>{provenance}'
                 f'{content}</section></main></body></html>').encode("utf-8")

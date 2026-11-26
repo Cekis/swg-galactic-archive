@@ -497,7 +497,7 @@ def scene_title(scene, strings):
     planet_names = {"kashyyyk_main": "Kashyyyk · Kachirho", "space_tatooine": "Tatooine Space",
                     "space_corellia": "Corellian Space", "space_naboo": "Naboo Space",
                     "space_ord_mantell": "Ord Mantell Space", "space_npe_falcon": "Millennium Falcon"}
-    return (planet_names.get(scene) or PLANETS.get(scene) or strings.name("planet_n", scene)
+    return (strings.name("planet_n", scene) or planet_names.get(scene) or PLANETS.get(scene)
             or strings.name("zone_n", scene) or display_id(scene))
 
 
@@ -506,7 +506,7 @@ def coords(row, columns):
     return values if all(value is not None for value in values) else None
 
 
-def load_places(files, strings, spatial):
+def load_places(files, strings, spatial, *, include_known_worlds=False):
     places = {}
     world_info = {row.get("planet"): row for row in files.tab(SERVER / "region/planets.tab")}
 
@@ -519,7 +519,10 @@ def load_places(files, strings, spatial):
                              if row else None, "sources": [row.source] if row else []}
         return places[scene]
 
-    for scene in sorted(set(world_info) | {entry["scene"] for entry in spatial.maps.values()} | set(PLANETS)):
+    scenes = set(world_info) | {entry["scene"] for entry in spatial.maps.values()}
+    if include_known_worlds:
+        scenes.update(PLANETS)
+    for scene in sorted(scenes):
         if scene:
             world(scene)
     for path in files.paths(SERVER / "region", "region_*.tab"):

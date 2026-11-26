@@ -8,7 +8,7 @@ import struct
 from catalog_locations import CELL_TEMPLATE, _compose, _display_coordinates, _rotation
 from catalog_models import ModelError, chunks, version
 from catalog_sources import read_iff_table
-from validate_buildout_templates import catalog as crc_catalog
+from catalog_iff import crc_catalog
 
 
 BUILDOUT = PurePosixPath("datatables/buildout")

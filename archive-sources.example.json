@@ -1,0 +1,9 @@
+{
+  "sources": {
+    "src": {"path": "../../game-inputs/src"},
+    "dsrc": {"path": "../../game-inputs/dsrc"},
+    "clientdata": {"path": "../../game-inputs/clientdata"},
+    "client-tools": {"path": "../../game-inputs/client-tools"},
+    "game-data": null
+  }
+}

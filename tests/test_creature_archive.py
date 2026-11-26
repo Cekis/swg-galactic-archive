@@ -9,8 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from catalog_db import Catalog
 from catalog_drops import DropTables, _hit, gate_probability
 from catalog_models import ModelLibrary
-from catalog_sources import DEFAULT_CLIENT, DEFAULT_TOOLS, PROJECT, SERVER
-from manifest_sources import read_tab
+from archive_config import legacy_asset
+from catalog_sources import PROJECT, SERVER
+from archive_quests.manifest_sources import read_tab
 
 
 class TableFiles:
@@ -159,9 +160,9 @@ class CreatureArchiveTests(unittest.TestCase):
         self.assertEqual(source["details"][0]["conditional_probability"], 1)
 
     def test_model_table_and_bounds_recovery_use_supplied_native_geometry(self):
-        if not DEFAULT_CLIENT.is_dir():
+        if not legacy_asset("clientdata", "SWG_CLIENTDATA").is_dir():
             self.skipTest("Client assets are not available.")
-        models = ModelLibrary(DEFAULT_CLIENT, DEFAULT_TOOLS)
+        models = ModelLibrary(legacy_asset("clientdata", "SWG_CLIENTDATA"), legacy_asset("client-tools", "SWG_CLIENT_TOOLS"))
         for ident in ("dark_jedi_sentinel", "bol", "space/bestine_pirate"):
             with self.subTest(ident=ident):
                 profile = self.catalog.entity("npcs", ident)["data"]

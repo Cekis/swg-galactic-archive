@@ -81,6 +81,7 @@ class Writer:
                 PRIMARY KEY (kind, id, role, target_kind, target_id)
             ) WITHOUT ROWID;
             CREATE TABLE metadata (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+            CREATE TABLE source_path (path TEXT PRIMARY KEY, remote_path TEXT NOT NULL) WITHOUT ROWID;
         """)
         self.connection.executescript(MAP_INDEX + MAP_LOOKUP + PLACEMENT_SCHEMA)
         self.markers = MapWriter(self.connection)
@@ -140,6 +141,16 @@ class Catalog:
             yield connection
         finally:
             connection.close()
+
+    def metadata(self):
+        with self.connect() as db:
+            row = db.execute("SELECT data FROM metadata WHERE key='catalog'").fetchone()
+        return json.loads(row[0])
+
+    def source_path(self, path):
+        with self.connect() as db:
+            row = db.execute("SELECT remote_path FROM source_path WHERE path=?", (path,)).fetchone()
+        return row[0] if row else None
 
     def meta(self):
         with self.connect() as db:

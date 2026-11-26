@@ -10,17 +10,21 @@ import unittest
 PROJECT = Path(__file__).parents[1]
 sys.path.insert(0, str(PROJECT))
 
+from archive_config import legacy_asset, legacy_game
 from catalog_models import ModelLibrary, chunks, portal_exterior
 from catalog_ships import load_ships
-from catalog_sources import DEFAULT_CLIENT, DEFAULT_TOOLS, ClientStrings, Files
+from catalog_sources import ClientStrings, Files
 
 
 class ShipCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.clientdata = Path(os.environ.get("SWG_CLIENTDATA", DEFAULT_CLIENT))
-        cls.strings = ClientStrings(cls.clientdata, DEFAULT_TOOLS)
-        cls.ships = load_ships(Files(), cls.strings, cls.clientdata)
+        cls.clientdata = Path(os.environ.get("SWG_CLIENTDATA", legacy_asset("clientdata", "SWG_CLIENTDATA")))
+        cls.strings = ClientStrings(cls.clientdata, legacy_asset("client-tools", "SWG_CLIENT_TOOLS"))
+        game = legacy_game()
+        if not (game / "docs/quests/manifest.json").is_file():
+            raise unittest.SkipTest("The original ship source fixture is unavailable.")
+        cls.ships = load_ships(Files(directory=game), cls.strings, cls.clientdata)
 
     def test_chassis_identity_and_variants_follow_server_ship_type(self):
         self.assertEqual(self.ships["player_corvette"]["availability"], "server-reference")

@@ -100,7 +100,9 @@ export function sourceText(proof) {
   if (!proof?.path) return "";
   const suffix = proof.line ? `:${proof.line}` : proof.row ? ` · row ${proof.row}` : "";
   const reference = escapeHTML(proof.path + suffix);
-  const url = archiveSource(proof.path, proof.line);
+  const root = proof.asset_root ?? (proof.scope === "supplied_clientdata" ? "clientdata" : null);
+  const path = root && !proof.path.startsWith(root + "/") ? root + "/" + proof.path : proof.path;
+  const url = archiveSource(path, proof.line);
   return url ? `<a class="source-reference source-link" href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer">${reference}</a>` :
     `<span class="source-reference">${reference}</span>`;
 }

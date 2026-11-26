@@ -13,10 +13,11 @@ import struct
 from zipfile import ZipFile
 import zlib
 
+from archive_config import add_source_options, select_profile
 from catalog_db import Catalog
 from catalog_model_previews import model_refs, render_inventory_model
 from catalog_models import MAX_ASSET_BYTES, ModelLibrary, normalize_ref
-from catalog_sources import DEFAULT_CLIENT, DEFAULT_TOOLS, PROJECT, ROOT
+from catalog_sources import GAME_MODEL_PATHS
 
 
 MODEL_SUFFIXES = {
@@ -273,35 +274,39 @@ def write_report(path, result):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=PROJECT / ".local/catalog.sqlite3")
-    parser.add_argument("--clientdata", type=Path, default=DEFAULT_CLIENT)
-    parser.add_argument("--client-tools", type=Path, default=DEFAULT_TOOLS)
-    parser.add_argument("--overlay", type=Path, default=PROJECT / ".local/model-assets")
+    add_source_options(parser)
+    parser.add_argument("--overlay", type=Path, help="Write recovered assets to a staging directory.")
     parser.add_argument("--seed", type=Path, help="Copy an existing local overlay into a fresh staging directory.")
     parser.add_argument("--snapshot", type=Path, action="append", default=[], help="Pinned SWG-Source ZIP, repeatable.")
-    parser.add_argument("--report", type=Path, default=PROJECT / ".local/model-recovery/item-model-coverage.json")
+    parser.add_argument("--report", type=Path, help="Path for the JSON coverage report.")
     args = parser.parse_args()
+    profile = select_profile(args)
+    catalog = Catalog(args.database or profile.database)
+    if catalog.metadata().get("source_key") != profile.key:
+        parser.error("Rebuild the catalog with the selected source configuration before recovering model assets.")
+    clientdata, tools = profile.root("clientdata"), profile.root("client-tools")
+    overlay = args.overlay or profile.overlay
+    report_path = args.report or profile.state / "model-recovery/item-model-coverage.json"
     if args.seed:
-        if args.overlay.exists():
+        if overlay.exists():
             parser.error("--seed requires a fresh staging directory.")
-        shutil.copytree(args.seed, args.overlay)
+        shutil.copytree(args.seed, overlay)
     if args.snapshot:
-        args.overlay.mkdir(parents=True, exist_ok=True)
+        overlay.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
-        manifest = args.client_tools / "publish/client_data_tree_files.mft"
+        manifest = tools / "publish/client_data_tree_files.mft"
         sources = UpstreamAssets(stack, args.snapshot, manifest) if args.snapshot else None
-        supplemental = (ROOT / "data/sku.0/sys.shared/compiled/game", ROOT / "data/sku.0/sys.client/built/game")
-        models = ItemAudit(args.clientdata, args.client_tools, supplemental,
-                           asset_overlay=args.overlay, source_assets=sources)
-        report = audit(Catalog(args.database), models)
+        supplemental = (profile.root("game-data") / path for path in GAME_MODEL_PATHS)
+        models = ItemAudit(clientdata, tools, supplemental, asset_overlay=overlay, source_assets=sources)
+        report = audit(catalog, models)
         if sources:
-            provenance = args.overlay / "item-model-recovery-sources.json"
+            provenance = overlay / "item-model-recovery-sources.json"
             previous = json.loads(provenance.read_text(encoding="utf-8")) if provenance.is_file() else {}
             staged = {**previous.get("staged", {}), **models.staged}
             write_report(provenance, {"revisions": sources.revisions, "staged": staged})
             report.update(snapshots=sources.revisions, restored_files=len(staged))
             print(f"{len(staged):,} restored assets on record", flush=True)
-        write_report(args.report, report)
+        write_report(report_path, report)
 
 
 if __name__ == "__main__":
