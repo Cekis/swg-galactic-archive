@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en" data-archive-version="__ARCHIVE_VERSION__">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Search the local Star Wars Galaxies reference for quests, NPCs, items, schematics, resources, and player ships.">
+  <title>Star Wars Galaxies Galactic Archive</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/site.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="Star Wars Galaxies Galactic Archive home">
+        <span class="brand-mark" aria-hidden="true"><i></i></span>
+        <span><strong>GALACTIC ARCHIVE</strong><small>Star Wars Galaxies</small></span>
+      </a>
+      <nav aria-label="Main navigation" class="site-nav">
+        <a href="/">Home</a>
+        <a href="/quests">Quests</a>
+        <a href="/npcs">NPCs</a>
+        <a href="/locations">Locations</a>
+        <a href="/items">Items</a>
+        <a href="/schematics">Schematics</a>
+        <a href="/resources">Resources</a>
+        <a href="/ships">Ships</a>
+        <a href="/conversations">Dialogue</a>
+      </nav>
+      <button class="global-search" type="button" aria-label="Search the archive"><span class="glass"></span><span>Search</span><kbd>/</kbd></button>
+    </div>
+  </header>
+  <div id="page-loading" class="page-loading" role="status" aria-atomic="true"><span class="sr-only">Loading the archive…</span></div>
+  <main id="main" tabindex="-1" class="app-shell" aria-live="off" aria-busy="true">
+    <section class="loading-panel" aria-hidden="true"><span class="loading-indicator"><span class="loading-spinner"></span>Loading the archive…</span></section>
+  </main>
+  <footer class="site-footer">
+    <div><span>Star Wars Galaxies Galactic Archive</span><span id="snapshot"></span></div>
+  </footer>
+  <dialog id="archive-search" class="search-dialog">
+    <form id="global-search-form" class="dialog-search-form">
+      <label for="global-query">Search the archive</label>
+      <div class="search-field"><span class="glass"></span><input id="global-query" type="search" autocomplete="off" placeholder="Search names and game IDs"><button type="button" class="icon-button" aria-label="Close search">×</button></div>
+    </form>
+    <div id="global-results" class="global-results" aria-live="polite"></div>
+  </dialog>
+</body>
+</html>
