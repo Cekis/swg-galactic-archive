@@ -144,6 +144,10 @@ python -m pip install -r requirements.txt
 Open http://127.0.0.1:8768/ in a browser. Set `--port` to select a different port.
 The SQLite catalog and local-only source excerpts are included.
 Published source links point to the pinned repository on GitHub.
+
+The Agent data guide is available at /llms.txt. The bundled catalog_agent.py
+command reads .local/catalog.sqlite3 to search and browse the index offline
+or export a ZIP of JSON Lines files.
 """
     if mode == "github":
         intro += """

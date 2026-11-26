@@ -347,9 +347,22 @@ def creature_drops(db, ident, query, page, size, sort="chance-desc"):
     return _drop_page(_drop_rows(db, ident), query, page, size, sort)
 
 
-def item_drops(db, ident, query, page, size, sort="chance-desc"):
+def summarize_drop_chances(rows):
+    positive = [row["chance"] for row in rows if row["chance"] is not None and row["chance"] > 0]
+    highest = max(positive, default=None)
+    return {"highest_chance": highest, "ranked_npcs": len(positive),
+            "tied_npcs": sum(math.isclose(chance, highest, rel_tol=1e-12) for chance in positive),
+            "unranked_npcs": sum(row["chance"] is None for row in rows),
+            "zero_chance_npcs": sum(row["chance"] == 0 for row in rows)}
+
+
+def item_drops(db, ident, query, page, size, sort="chance-desc", *, summarize=False):
     rows = (row for row in _drop_rows(db, ident, by_item=True) if row["chance"] != 0 or row["qualified"])
+    if summarize:
+        rows = list(rows)
     result = _drop_page(rows, query, page, size, sort)
+    if summarize:
+        result["summary"] = summarize_drop_chances(rows)
     result["other_sources"] = [json.loads(raw) for raw, in db.execute(
         "SELECT data FROM item_loot_source WHERE item=?", (ident,)
     )]

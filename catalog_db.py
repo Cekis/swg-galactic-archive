@@ -249,11 +249,11 @@ class Catalog:
                                for ident, in ids]
         return found
 
-    def item_loot_npcs(self, ident, page=1, size=30, *, query="", sort="chance-desc"):
+    def item_loot_npcs(self, ident, page=1, size=30, *, query="", sort="chance-desc", summarize=False):
         if not self.has_npc_drops:
             return {"rows": [], "total": 0, "page": 1, "pages": 1, "size": size, "other_sources": []}
         with self.connect() as db:
-            result = item_drops(db, ident, query, page, size, sort)
+            result = item_drops(db, ident, query, page, size, sort, summarize=summarize)
             page_rows = {row["id"]: row for row in result["rows"]}
             if not page_rows:
                 return result

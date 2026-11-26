@@ -7,6 +7,7 @@
   <title>Star Wars Galaxies Galactic Archive</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/site.css">
+  <link rel="describedby" href="/llms.txt">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -36,7 +37,11 @@
     <section class="loading-panel" aria-hidden="true"><span class="loading-indicator"><span class="loading-spinner"></span>Loading the archive…</span></section>
   </main>
   <footer class="site-footer">
-    <div><span>Star Wars Galaxies Galactic Archive</span><span id="snapshot"></span></div>
+    <div>
+      <span>Star Wars Galaxies Galactic Archive</span>
+      <a href="/llms.txt" target="_blank" rel="noopener">Agent data guide</a>
+      <span id="snapshot"></span>
+    </div>
   </footer>
   <dialog id="archive-search" class="search-dialog">
     <form id="global-search-form" class="dialog-search-form">

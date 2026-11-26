@@ -10,6 +10,7 @@ import re
 from urllib.parse import parse_qs, urlsplit
 
 from archive_config import PROJECT, add_source_options, select_profile
+from catalog_agent import LOOT_ROUTE, MANIFEST_ROUTE, MAX_DROPS, agent_guide, agent_manifest, loot_ranking
 from catalog_db import BROWSE_SORT, DIALOGUE_SORT, PLACEMENT_SORT, Catalog, KINDS, SCHEMA, packed
 from catalog_locations import MapLibrary
 from catalog_map import AREA_LAYERS, LAYERS, bounds_from_query
@@ -115,6 +116,10 @@ class ArchiveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         request = urlsplit(self.path)
         path = request.path.rstrip("/") or "/"
+        if path == "/llms.txt":
+            contents = agent_guide(self.server.meta).encode("utf-8")
+            self.respond(contents, "text/plain; charset=utf-8")
+            return
         if path == "/source":
             try:
                 fields = parse_qs(request.query, max_num_fields=4)
@@ -174,6 +179,14 @@ class ArchiveHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/meta":
             self.json(self.server.meta)
+            return
+        if path == MANIFEST_ROUTE:
+            self.json(agent_manifest(self.server.meta))
+            return
+        if path == LOOT_ROUTE:
+            limit = normalize_int(field("size"), 3, 1, MAX_DROPS)
+            self.json(loot_ranking(catalog, query=field("q"), item_id=field("item"),
+                                   limit=limit, metadata=self.server.meta))
             return
         if match := MAP_ROUTE.fullmatch(path):
             metadata = self.server.meta["maps"].get(match[1])
