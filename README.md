@@ -1,45 +1,119 @@
 # Star Wars Galaxies Galactic Archive
 
 The archive is a standalone local reference site for Star Wars Galaxies.
-It links the game checkout's quest manifest to NPCs, locations, dialogue,
+It indexes the configured game data and links quests to NPCs, locations, dialogue,
 item templates, crafting recipes, resources, and player ships.
 
 Open [the local archive](http://127.0.0.1:8768/) while the server is running.
 The home dashboard explains what you can find in each section, shows
 counts from the current index, and searches all sections from one field.
 
-## Run
+## Configure the source repositories
 
-Run the launcher from the archive directory on Windows.
+From the Archive checkout, copy [the configuration template](archive-sources.example.json)
+to `.local/sources.json` and replace the example paths. On Windows, use
+these commands the first time you set up the Archive.
 
 ~~~powershell
+New-Item -ItemType Directory -Path .local -Force | Out-Null
+Copy-Item archive-sources.example.json .local/sources.json
+~~~
+
+The top-level `sources` object selects your inputs. Paths may be absolute
+or relative to the directory containing the configuration file. Windows
+paths can use forward slashes, as in `F:/SWGProjects/my-server`.
+
+| Input | What it supplies |
+| --- | --- |
+| `dsrc` | Required Git checkout containing `sku.0/sys.server/compiled/game`. The indexer reads server and shared datatables, scripts, and object templates at the selected commit. |
+| `clientdata` | Required extracted client data in its original layout, with directories such as `object/`, `appearance/`, and `texture/`. This supplies maps, models, icons, and compiled tables. |
+| `client-tools` | Optional supplemental client assets. English STF files here take precedence over `clientdata/string/en`. One of those inputs must contain the English strings. |
+| `src` | Optional native source checkout for code references. |
+| `game-data` | Optional staged, compiled `data` directory for additional model files. |
+
+For each input, set either `path` for a local directory or `github`
+for a repository in `OWNER/REPOSITORY` form. Set optional inputs to
+`null` or omit them. Use `subdirectory` when the input is nested
+inside the selected repository. In a split `dsrc` checkout, `sku.0/`
+is typically at the repository root.
+
+This example reads server code and data from subdirectories of one GitHub
+repository and client assets from an extracted local directory.
+
+~~~json
+{
+  "sources": {
+    "src": {"github": "your-organization/swg-server", "revision": "main", "subdirectory": "src"},
+    "dsrc": {"github": "your-organization/swg-server", "revision": "main", "subdirectory": "dsrc"},
+    "clientdata": {"path": "../../game-inputs/clientdata"}
+  }
+}
+~~~
+
+- **GitHub sources** accept a branch name or a full commit SHA in
+  `revision`. Omit it to follow the default branch. The Archive resolves
+  branches through GitHub and caches each selected commit locally. Private
+  repositories use your Git credential helper.
+- **Local server sources** use their current Git commit by default.
+  Set `revision` to select another branch or commit already available in
+  the checkout.
+- **Local client assets** are read from the directory you select. If you
+  specify a Git revision for one of those asset directories, check out
+  that revision before using it.
+
+The indexer generates the quest manifest from the selected data and scripts.
+An optional top-level `quest_annotations` path can supply manually
+documented script-only quests or additional evidence. That JSON file can
+contain `quests`, `annotations`, and `systems` arrays.
+
+## Run locally
+
+Install Python 3.10 or newer, Git, and Pillow. Pillow decodes the client
+artwork and textures.
+
+~~~powershell
+python -m pip install Pillow
 ./start.ps1
 ~~~
 
-The first launch builds the SQLite index in the archive's `.local/` directory.
-Pass `-Background` to run the server in a hidden process and record its PID
-and logs there. The default game checkout is the sibling
-`whitengold-ai/whitengold` directory under the same projects folder. Pass
-`-GameRoot` or set `SWG_GAME_ROOT` to specify another checkout.
-Use `-ClientData` and `-ClientTools` to select extracted asset directories.
-The server listens on `127.0.0.1`, and `-Port` overrides the default port 8768.
+The Windows launcher finds `.local/sources.json` automatically. It builds
+the index on first launch and when the selected revisions or configuration
+change. Select another file with `-SourcesConfig PATH`. Use `-Port`
+to choose a port or `-Background` to run a hidden process with its PID
+and logs under `.local/`.
 
-Run these commands from the archive directory on WSL or Linux.
+## Regenerate the catalog
 
-~~~bash
-python3 -B build_catalog.py
-python3 -B serve.py --port 8768
+1. Update the selected source checkouts or edit the configuration. Commit
+   local `src` and `dsrc` changes first. For a GitHub branch, the
+   build resolves its latest commit. For a pinned source, edit the
+   `revision` field to choose a newer commit.
+2. Stop the Archive instance serving that catalog.
+3. From the Archive checkout, rebuild the index and start the server with
+   the same configuration file. These commands work on Windows, Linux,
+   and WSL.
+
+~~~text
+python -B build_catalog.py --sources .local/sources.json
+python -B serve.py --sources .local/sources.json
 ~~~
 
-Python 3.10 or newer provides the web server, index, and asset decoders.
-Pillow decodes the client resource icons, map images, and model textures. The browser uses
-WebGL for models and can show a geometry preview when WebGL is unavailable.
+On Windows, `./start.ps1 -Rebuild` does both. Use it after changing
+loose client assets even when the selected Git revisions are the same.
 
-Use `-Rebuild` to refresh an existing index after the schema, manifest, or supplied assets change. The
-game source revision comes from `source_revision` in the manifest.
-The game checkout provides `docs/quests/manifest.json`, source parsers,
-and source records. The archive reads the game checkout and client asset
-directories in place and stores its generated files in the archive directory.
+Every rebuild creates a fresh SQLite catalog in a temporary file. A
+successful build replaces the previous catalog, so changed records and
+links are updated and deleted source records disappear. A failed build
+leaves the last successful catalog available. The generated catalog and
+recovered asset cache live under `.local/profiles/` for each configuration.
+
+Open [the catalog metadata](http://127.0.0.1:8768/api/meta) after starting
+the server to check the resolved source revisions and record counts. To
+update an extracted deployment, build a new ZIP from the regenerated catalog
+and install it in a fresh directory. See [Portable deployment](#portable-deployment).
+
+Existing installations can continue using `SWG_GAME_ROOT` or
+`-GameRoot` with the original manifest-backed catalog.
 
 ## What the pages show
 
@@ -98,8 +172,8 @@ Select it again to reverse the order.
   each other's detail views.
   Distinct registrations with the same name show their IDs in child lists.
 - **Maps** fill the location page width and use the supplied game artwork.
-  Hoth and Ord Mantell use coordinate charts. The supplied client layout has
-  no coordinate-aligned map artwork for either scene.
+  Locations with coordinate-aligned artwork in the selected client show the
+  game map. Other mapped locations show a coordinate chart.
   Open Layers to choose markers, add the coordinate grid, or toggle region,
   no-build, and building outlines. Region outlines use the original circles
   and rectangles. The no-build layer also includes circles defined by placed
@@ -133,11 +207,10 @@ Select it again to reverse the order.
   Locations tab opens the building's placement on the world map.
   Runtime-only player placements and arbitrary script outcomes require live
   game data. A portal CRC mismatch leaves the authored cell slots visible.
-- **Source references** open files in `SWG-Source/whitengold` at a verified
-  published commit. Text links include a line anchor when the published file
-  matches the archive snapshot. Local recovery files open an excerpt from the
-  indexed checkout. Coordinates and string codes with a copy icon still copy
-  their displayed values.
+- **Source references** open files in the configured GitHub repositories
+  at their selected commits. Parsed data records link to their source line
+  where available. Text from local checkouts opens as an excerpt. Coordinates
+  and string codes with a copy icon copy their displayed values.
 - **Items** include server templates, static variants, client references,
   ship components, resource containers, and records from the quest,
   equipment, vendor, loot, and crafting data. Use the Craftable acquisition
@@ -212,20 +285,22 @@ materials at their original paths. This also reads the bundled client patch
 TRE. The audit distinguishes rendered geometry from sprites, proxy geometry,
 and unresolved entries.
 
+Pass `--sources` to use a selected configuration's catalog and asset roots.
 Use `--overlay` for a staging directory and `--seed` to copy an existing
-overlay into it. Review the JSON from `--report` before making the staging
-directory the live `.local/model-assets/` overlay. Restart the archive to
-pick up new files. The overlay records the repository, revision, asset path,
-and manifest match for each recovered file in `item-model-recovery-sources.json`.
+overlay into it. The default overlay belongs to the selected configuration
+and source versions. Restart the archive to pick up recovered files. The
+overlay records the repository, revision, asset path, and manifest match
+for each recovered file in `item-model-recovery-sources.json`.
 The recovery uses the supplied asset checkouts as read-only inputs.
 
 ## Portable deployment
 
-Build a ZIP from the current SQLite catalog and the native files used by
-the viewer.
+After regenerating the catalog, build a ZIP using the same source configuration.
+Choose a fresh output directory for each build. The builder packages the current
+SQLite index and the native files used by the viewer.
 
 ```powershell
-python -B build_deployment.py --output .local/deployments
+python -B build_deployment.py --sources .local/sources.json --output .local/deployments/refresh-1
 ```
 
 The builder checks every indexed model and NPC appearance choice, each
@@ -233,24 +308,34 @@ map image and thumbnail, and every resource icon. It ships the original
 asset bytes along with a SHA-256 manifest. Published source links open
 GitHub and local source excerpts are included for the catalog revision.
 
-Add `--with-github` to make a second ZIP that references files whose
-bytes match the pinned SWG Source snapshots. Supply snapshot ZIPs with
-repeatable `--snapshot` arguments or use the existing recovery cache.
-On the deployment host, `python deployment_assets.py --download` fetches
-only the missing files from their pinned GitHub revisions. Use
-`--snapshot-dir PATH` to reuse existing repository ZIPs.
+Add `--with-github` to make a second ZIP that refers to native files whose
+bytes match the pinned GitHub checkouts. Selected files unique to local
+directories are included in the package. For the original source layout,
+previously downloaded recovery ZIPs can also be supplied through repeatable
+`--snapshot` arguments.
 
-Use `verify_deployment.py` with the ZIP and `--work PATH` to test a
-fresh extraction against the original viewer audit. Pass
-`--github-bundle ZIP` to verify the reference package as well.
+On a deployment host, `python deployment_assets.py --download` fetches missing assets from the pinned
+revisions and verifies their checksums. Private GitHub asset downloads can
+use a read token provided in `GH_TOKEN` or `GITHUB_TOKEN`. To reuse archive
+ZIPs, pass `--snapshot-dir PATH` and place each ZIP at
+`OWNER/REPOSITORY-COMMIT.zip` within that directory. The site runs from the extracted
+package after asset installation.
+
+Use `verify_deployment.py` with the ZIP and `--work PATH` to test a fresh extraction
+against the original viewer audit. Use `--github-bundle ZIP` to verify the
+reference package as well. Pass `--download` to the verifier to fetch
+references that lack a cached ZIP.
 
 ## Verify
 
-Once the index exists, run the tests from the archive directory.
+Run the tests from the Archive checkout.
 
 ~~~powershell
 python -B -m unittest discover -s tests -v
 ~~~
+
+The source-configuration tests use temporary repositories. The historical
+content checks use the original game and asset fixtures when available.
 
 The tests cover manifest coverage, dialogue alignment, world-coordinate
 conversion, map filters and coincident markers, location descriptions,
