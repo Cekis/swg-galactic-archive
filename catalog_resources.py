@@ -56,7 +56,8 @@ def load_resources(files, strings, clientdata, models):
     authored = list(rows_in_tree((row.cells, row.source) for row in files.tab(RESOURCE_TREE)))
     try:
         _, _, client_rows = read_iff_table(clientdata / CLIENT_TREE)
-    except (OSError, ValueError, struct.error):
+    except (OSError, ValueError, struct.error) as error:
+        models.report_issue("Resources", f"Could not read client resource tree {clientdata / CLIENT_TREE}. {type(error).__name__}.")
         client_rows = []
     client = list(rows_in_tree((cells, {"path": "clientdata/" + CLIENT_TREE, "row": index})
                                for index, cells in enumerate(client_rows, 1)))

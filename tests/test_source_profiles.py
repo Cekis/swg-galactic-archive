@@ -107,6 +107,53 @@ def model_assets(root, texture):
 
 
 class SourceProfileTests(unittest.TestCase):
+    def test_build_log_is_refreshed_and_mirrored_when_reusing_the_catalog(self):
+        with TemporaryDirectory() as work:
+            root = Path(work)
+            game, client = root / "game", root / "client"
+            init(game)
+            server = game / SERVER_PATH
+            tab(server / "region/planets.tab",
+                ("planet", "minX", "minZ", "maxX", "maxZ"), ("s", "i", "i", "i", "i"),
+                ("test_scene", -500, -500, 500, 500))
+            tab(server / "mob/creatures.tab", ("creatureName", "template"), ("s", "s"),
+                ("fixture_creature", "appearance/mesh/fixture.msh"))
+            commit(game)
+            stf(client / "string/en/fixture.stf", name="Fixture")
+            save(client / "ui/ui_planet_map.inc",
+                 "<Page Name='test_scene' MapWidth='1000,1000'><Image SourceResource='ui_map_test_scene' "
+                 "SourceRect='0,0,8,8'></Image></Page>")
+            config = root / "sources.json"
+            save(config, json.dumps({"sources": {"dsrc": {"path": "game"}, "clientdata": {"path": "client"}}}))
+            database = root / "catalog.sqlite3"
+            log = root / "catalog.build.log"
+            command = [sys.executable, "-B", str(Path(__file__).resolve().parents[1] / "build_catalog.py"),
+                       "--sources", str(config), "--database", str(database)]
+            expected = (
+                ("Maps", "ui_map_test_scene.dds"),
+                ("Buildouts", "buildout_scenes.iff"),
+                ("Models", "appearance/mesh/fixture.msh"),
+            )
+
+            for options in ([], ["--if-needed"]):
+                save(log, "Output from an earlier build\n")
+                result = subprocess.run([*command, *options], capture_output=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(log.read_text(encoding="utf-8"), result.stdout)
+                self.assertNotIn("earlier build", result.stdout)
+                self.assertEqual("Reusing catalog" in result.stdout, bool(options))
+                for category, path in expected:
+                    self.assertTrue(any(line.startswith(f"WARNING [{category}]") and path in line
+                                        for line in result.stdout.splitlines()), result.stdout)
+
+            config.unlink()
+            failed = subprocess.run(command, capture_output=True, encoding="utf-8")
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(log.read_text(encoding="utf-8"), failed.stdout)
+            self.assertIn("ERROR [Build]", failed.stdout)
+            self.assertIn("sources.json", failed.stdout)
+            self.assertNotIn("Reusing catalog", failed.stdout)
+
     def test_refresh_updates_adds_and_removes_records_from_selected_sources(self):
         with TemporaryDirectory() as work:
             root = Path(work)

@@ -252,9 +252,10 @@ class _ObjectLocations(Mapping):
 class LocationIndex:
     """Provide world-space NPC, object and map locations from read-only game sources."""
 
-    def __init__(self, files, clientdata: Path | None = None):
+    def __init__(self, files, clientdata: Path | None = None, *, report_issue=None):
         self.files = files
         self.clientdata = Path(clientdata).resolve() if clientdata else None
+        self.report_issue = report_issue or (lambda *_: None)
         self.areas = self._read_areas()
         self._authored_mobs = {row.get("creatureName") for row in self._table(SERVER / "mob/creatures.tab")}
         self._sources = defaultdict(list)
@@ -285,8 +286,14 @@ class LocationIndex:
         return self.files.tab(path) if self.files.exists(path) else ()
 
     def _read_areas(self):
-        scene_indexes = {row.get("sceneName"): index
-                         for index, row in enumerate(self._table(BUILDOUT / "buildout_scenes.tab"))}
+        registry = BUILDOUT / "buildout_scenes.tab"
+        if not self.files.exists(registry):
+            self.report_issue("Buildouts", f"Missing source scene registry {registry.as_posix()}.")
+        scene_indexes = {row.get("sceneName"): index for index, row in enumerate(self._table(registry))}
+        for scene in scene_indexes:
+            path = BUILDOUT / f"areas_{scene}.tab"
+            if scene and not self.files.exists(path):
+                self.report_issue("Buildouts", f"Missing source area registration {path.as_posix()}.")
         areas = defaultdict(list)
         for path in self.files.paths(BUILDOUT, "areas_*.tab"):
             scene = path.stem.removeprefix("areas_")
@@ -804,9 +811,13 @@ class LocationIndex:
     def _read_portal_asset(self, asset_name):
         asset = self._client_asset(asset_name)
         try:
-            parsed = _portal_cells(asset) if asset else None
+            if not asset:
+                self.report_issue("Buildouts", f"Missing client portal layout {self.clientdata / asset_name}.")
+                return None
+            parsed = _portal_cells(asset)
             return (asset_name, *parsed) if parsed else None
-        except (OSError, ValueError, IndexError, StopIteration, struct.error):
+        except (OSError, ValueError, IndexError, StopIteration, struct.error) as error:
+            self.report_issue("Buildouts", f"Could not read client portal layout {asset}. {type(error).__name__}.")
             return None
 
     def spawn_origin(self, record, script, script_source, *, table_source=None, caller_source=None):
@@ -821,6 +832,9 @@ class LocationIndex:
             if not re.fullmatch(r"datatables/[a-z0-9_/-]+\.iff", table):
                 continue
             path = SERVER.parent / Path(table).with_suffix(".tab")
+            if not self.files.exists(path):
+                self.report_issue("Buildouts", f"Missing building spawn table {path.as_posix()}.")
+                continue
             script_source = self._spawn_script(script)
             layout = self._portal_rooms(building.template)
             expected_crc = _object_id(expected_layout) if expected_layout else building.portal_crc
@@ -1021,6 +1035,8 @@ class LocationIndex:
     def _create_maps(self):
         layout = self._client_asset(MAP_LAYOUT)
         style = {}
+        if self.clientdata and not layout:
+            self.report_issue("Maps", f"Missing client map layout {self.clientdata / MAP_LAYOUT}. Coordinate maps will be used.")
         if layout:
             for match in UI_MAP_ENTRY.finditer(layout.read_text(encoding="utf-8-sig", errors="replace")):
                 page, name, image, resource = match.groups()
@@ -1029,6 +1045,7 @@ class LocationIndex:
                     continue
                 asset = f"texture/{resource.lower()}.dds"
                 if not self._client_asset(asset):
+                    self.report_issue("Maps", f"Missing map texture {self.clientdata / asset} referenced by {layout.name}.")
                     continue
                 style[name] = (asset, _attribute_numbers(page, "MapWidth", 2),
                                _attribute_numbers(image, "SourceRect", 4))
@@ -1039,6 +1056,8 @@ class LocationIndex:
                                 for index, operation in enumerate((min, min, max, max)))
             terrain_path = f"terrain/{scene}.trn"
             terrain_width = _terrain_width(self._client_asset(terrain_path))
+            if self.clientdata and terrain_width is None:
+                self.report_issue("Maps", f"Could not read terrain bounds from {self.clientdata / terrain_path}. Using buildout bounds for {scene}.")
             base_bounds = (-terrain_width / 2, -terrain_width / 2,
                            terrain_width / 2, terrain_width / 2) if terrain_width else zone_bounds
             base_source = {"path": terrain_path, "asset_root": "clientdata"} if terrain_width else areas[0].source

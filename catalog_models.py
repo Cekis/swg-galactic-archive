@@ -545,7 +545,8 @@ class ModelLibrary:
     """Resolve a catalog template to bounded JSON from read-only client assets."""
 
     def __init__(self, clientdata: Path, client_tools: Path | None = None, asset_roots=(), *,
-                 asset_overlay: Path | None = None):
+                 asset_overlay: Path | None = None, report_issue=None):
+        self.report_issue = report_issue or (lambda *_: None)
         self.root = Path(clientdata).resolve()
         self.client_tools = Path(client_tools).resolve() if client_tools else None
         candidates = [self.root]
@@ -576,13 +577,21 @@ class ModelLibrary:
 
     def _blob(self, ref, prefix):
         path = self._path(ref, prefix)
-        if path.stat().st_size > MAX_ASSET_BYTES:
-            raise ModelError("Preview asset is larger than the local viewer limit")
-        return path.read_bytes()
+        try:
+            if path.stat().st_size > MAX_ASSET_BYTES:
+                raise ModelError("Preview asset is larger than the local viewer limit")
+            return path.read_bytes()
+        except FileNotFoundError:
+            self.report_issue("Models", f"Missing client model asset {ref}.")
+            raise
+        except OSError as error:
+            self.report_issue("Models", f"Could not read client model asset {path}. {type(error).__name__}.")
+            raise
 
     def _form(self, ref, prefix="appearance/"):
         result = next(chunks(memoryview(self._blob(ref, prefix))), None)
         if result is None or not result.form:
+            self.report_issue("Models", f"No IFF form could be read from {ref}.")
             raise ModelError("No IFF form in the client asset")
         return result
 
@@ -595,6 +604,7 @@ class ModelLibrary:
         candidates = (ref,) if path.name.startswith("shared_") else (shared, ref)
         selected = next((name for name in candidates if self._path(name, "object/").is_file()), None)
         if selected is None:
+            self.report_issue("Models", f"Missing client object template from {', '.join(candidates)}.")
             raise FileNotFoundError
         location = selected
         visited = set()
@@ -839,6 +849,7 @@ class ModelLibrary:
             finally:
                 if alternatives is not None:
                     alternatives.extend(other_levels)
+        self.report_issue("Models", f"No render mesh could be resolved for {ref}.")
         raise ModelError("The available appearance contains bounds, with no matching compiled render mesh.")
 
     def _model_form(self, ref, alternatives=None):

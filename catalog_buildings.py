@@ -149,7 +149,7 @@ def floor_mesh(root):
 
 class BuildingAssets(ModelLibrary):
     def __init__(self, spatial):
-        super().__init__(spatial.clientdata)
+        super().__init__(spatial.clientdata, report_issue=spatial.report_issue)
         self.spatial = spatial
         self.files = spatial.files
 

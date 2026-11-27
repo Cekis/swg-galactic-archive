@@ -109,6 +109,13 @@ python -B serve.py --sources .local/sources.json
 On Windows, `./start.ps1 -Rebuild` does both. Use it after changing
 loose client assets even when the selected Git revisions are the same.
 
+Each build invocation clears `.local/build.log` and mirrors its progress and
+warnings to stdout. Warnings identify missing map assets, buildout and portal
+files, unresolved model assets encountered during indexing, and unreadable
+resource or string tables. A launch that reuses a catalog lists its recorded warnings
+in the fresh log. An explicit `--database` path writes a `.build.log` beside
+that database.
+
 Every rebuild creates a fresh SQLite catalog in a temporary file. A
 successful build replaces the previous catalog, so changed records and
 links are updated and deleted source records disappear. A failed build

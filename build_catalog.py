@@ -2,13 +2,15 @@
 
 import argparse
 from collections import Counter, defaultdict
+from contextlib import redirect_stdout
 import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 import tempfile
 
-from archive_config import SourceRepository, add_source_options, select_profile
+from archive_config import PROJECT, SourceRepository, add_source_options, select_profile
 from archive_quests.manifest import manifest as generate_manifest
 
 from build_map_features import build_map_features
@@ -359,7 +361,59 @@ def publish_npcs(writer, dialogue, npcs, items, areas, world):
                             "template": npc.get("template")})
 
 
-def write_catalog(writer, profile):
+class BuildOutput:
+    def __init__(self, stdout, log):
+        self.stdout = stdout
+        self.log = log
+
+    def write(self, text):
+        self.log.write(text)
+        return self.stdout.write(text)
+
+    def flush(self):
+        self.log.flush()
+        self.stdout.flush()
+
+
+def print_build_issue(category, message):
+    print(f"WARNING [{category}] {message}", flush=True)
+
+
+class BuildIssues:
+    def __init__(self):
+        self.entries = set()
+
+    def __call__(self, category, message):
+        entry = (category, message)
+        if entry not in self.entries:
+            self.entries.add(entry)
+            print_build_issue(*entry)
+
+
+def report_coverage(issues, map_data, model_coverage, strings):
+    failures = {
+        "unregistered_buildout": "server placements have no matching buildout area registration",
+        "missing_buildout_parent": "server placements have a missing or ambiguous parent object",
+        "ambiguous_object_id": "server placements have an ambiguous object ID",
+        "invalid_object_id": "server placements have an invalid object ID",
+        "ambiguous_coordinate_frame": "server placements have an unresolved coordinate frame",
+        "invalid_coordinates": "server placements have invalid coordinates",
+        "client_buildout_coordinates_unresolved": "client buildout placements have unresolved coordinates",
+    }
+    for key, description in failures.items():
+        if count := map_data["placement_sources"].get(key):
+            issues("Buildouts", f"{count:,} {description}.")
+    if count := map_data["buildings"].get("unavailable_footprints"):
+        issues("Models", f"{count:,} building placements have no recoverable footprint geometry.")
+    if count := map_data["buildings"].get("mismatched_portal_layouts"):
+        issues("Buildouts", f"{count:,} building placements have a mismatched portal layout.")
+    if count := model_coverage.get("missing"):
+        issues("Models", f"{count:,} NPC model entries could not be resolved.")
+    for table, error in sorted(strings.errors.items()):
+        issues("Strings", f"Client string table {table} could not be read. {error}")
+
+
+def write_catalog(writer, profile, issues):
     clientdata, client_tools = profile.root("clientdata"), profile.root("client-tools")
     strings = ClientStrings(clientdata, client_tools)
     if not strings.roots:
@@ -382,7 +436,7 @@ def write_catalog(writer, profile):
     strings.prefetch(ref[0] for record in manifest["quests"] if (key := record["title"].get("key"))
                      and (ref := string_ref(key)))
     print("Indexing authored placements and maps", flush=True)
-    spatial = LocationIndex(files, clientdata)
+    spatial = LocationIndex(files, clientdata, report_issue=issues)
     npcs = load_npcs(files, strings, spatial)
     items = Items(files, strings)
     places, world = load_places(files, strings, spatial, include_known_worlds=not profile.key)
@@ -408,7 +462,8 @@ def write_catalog(writer, profile):
     origin_count = collect_quests(writer, files, strings, spatial, manifest, dialogue, npcs, items, world, legacy)
     print("Resolving NPC model templates against the game client", flush=True)
     models = ModelLibrary(clientdata, client_tools, (profile.root("game-data") / path for path in GAME_MODEL_PATHS),
-                          asset_overlay=profile.overlay)
+                          asset_overlay=profile.overlay, report_issue=issues)
+    print("Client model search roots", *(str(root) for root in models.roots), sep="\n  ", flush=True)
     model_coverage = NpcModels(files, models).index(npcs)
     publish_npcs(writer, dialogue, npcs, items, areas, world)
     for template, config in spatial.scripted_spawn_definitions():
@@ -449,7 +504,9 @@ def write_catalog(writer, profile):
                        **({"alias_for": LOCATION_ALIASES[ident]} if ident in LOCATION_ALIASES else {})}
                for ident, place in sorted(places.items()) if place["scene"] == ident}
     provenance = {"source_key": profile.key, "sources": profile.metadata()} if profile.key else {}
-    return writer.finish({**inventory, **provenance, "title": "Star Wars Galaxies Galactic Archive", "revision": files.revision,
+    report_coverage(issues, map_data, model_coverage, strings)
+    writer.connection.executemany("INSERT INTO build_issue VALUES (?,?)", sorted(issues.entries))
+    return writer.finish({**inventory, **provenance, "build_issue_count": len(issues.entries), "title": "Star Wars Galaxies Galactic Archive", "revision": files.revision,
                           "quest_source_counts": manifest["counts"], "origin_scene_records": origin_count,
                           "locations": filters, "ground_worlds": authored_ground_worlds(files.tab(SERVER / "region/planets.tab"), places),
                           "maps": spatial.maps, "map_layers": LAYERS, "map_data": map_data,
@@ -469,8 +526,9 @@ def build(path, profile):
     with tempfile.TemporaryDirectory(prefix="index-", dir=path.parent) as work:
         candidate = Path(work) / "catalog.sqlite3"
         writer = Writer(candidate)
+        issues = BuildIssues()
         try:
-            metadata = write_catalog(writer, profile)
+            metadata = write_catalog(writer, profile, issues)
         finally:
             writer.connection.close()
         candidate.replace(path)
@@ -482,17 +540,34 @@ def main():
     add_source_options(parser)
     parser.add_argument("--if-needed", action="store_true", help="Reuse a catalog built from the selected sources.")
     args = parser.parse_args()
+    log_path = args.database.resolve().with_suffix(".build.log") if args.database else PROJECT / ".local/build.log"
     try:
-        profile = select_profile(args)
-        database = args.database or profile.database
-        if args.if_needed and database.is_file():
-            recorded = Catalog(database).metadata()
-            if recorded.get("source_key") == profile.key and recorded.get("schema") == SCHEMA:
-                return
-        metadata = build(database, profile)
-    except (OSError, ValueError) as error:
-        parser.error(str(error))
-    print(json.dumps({key: metadata[key] for key in ("counts", "inventory", "dialogue", "map_data")}, indent=2))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = log_path.open("w", encoding="utf-8", buffering=1)
+    except OSError as error:
+        parser.error(f"Cannot open build log {log_path}. {error}")
+    with log, redirect_stdout(BuildOutput(sys.stdout, log)):
+        print(f"Build log {log_path}", flush=True)
+        try:
+            profile = select_profile(args)
+            database = args.database or profile.database
+            if args.if_needed and database.is_file():
+                catalog = Catalog(database)
+                recorded = catalog.metadata()
+                if (recorded.get("source_key") == profile.key and recorded.get("schema") == SCHEMA
+                        and "build_issue_count" in recorded):
+                    print(f"Reusing catalog {database}", flush=True)
+                    for issue in catalog.build_issues():
+                        print_build_issue(*issue)
+                    return
+            metadata = build(database, profile)
+        except Exception as error:
+            print(f"ERROR [Build] {error}", flush=True)
+            if isinstance(error, (OSError, ValueError)):
+                parser.error(str(error))
+            raise
+        print(json.dumps({key: metadata[key] for key in
+                          ("counts", "inventory", "dialogue", "map_data", "build_issue_count")}, indent=2), flush=True)
 
 
 if __name__ == "__main__":

@@ -496,8 +496,10 @@ def load_ships(files, strings, clientdata, *, model=None) -> dict[str, dict]:
                 try:
                     if model._path(asset, "appearance/").is_file():
                         record["sources"].append(_asset_source(asset))
-                except (OSError, ModelError):
-                    pass
+                    else:
+                        model.report_issue("Models", f"Ship {ident} references missing client appearance {asset}.")
+                except (OSError, ModelError) as error:
+                    model.report_issue("Models", f"Could not locate ship {ident} appearance {asset}. {error}")
             for localized in (record["name_ref"], record["description"], record["look_at_text"]):
                 if asset := localized.get("asset"):
                     record["sources"].append({"path": asset})

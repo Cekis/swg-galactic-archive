@@ -71,23 +71,27 @@ def compile_area_rows(rows, area, area_index, names):
         }
 
 
-def _buildouts(clientdata, issues):
+def _buildouts(clientdata, issues, report_issue):
+    registry = clientdata / BUILDOUT / "buildout_scenes.iff"
     try:
-        _, _, scenes = read_iff_table(clientdata / BUILDOUT / "buildout_scenes.iff")
-    except CLIENT_ERRORS:
+        _, _, scenes = read_iff_table(registry)
+    except CLIENT_ERRORS as error:
         issues["client_buildout_index_unavailable"] += 1
+        report_issue("Buildouts", f"Could not read client scene registry {registry}. {type(error).__name__}.")
         return
     try:
         templates = crc_catalog(clientdata / CRC_FILE)
-    except CLIENT_ERRORS:
+    except CLIENT_ERRORS as error:
         templates = {}
         issues["client_crc_index_unavailable"] += 1
+        report_issue("Buildouts", f"Could not read client template CRC index {clientdata / CRC_FILE}. {type(error).__name__}.")
     for scene_index, entry in enumerate(scenes):
         scene = entry.get("sceneName", "")
         if not scene or not scene.replace("_", "").isalnum():
             continue
         path = BUILDOUT / f"areas_{scene}.iff"
         if not (clientdata / path).is_file():
+            report_issue("Buildouts", f"Missing client area table {clientdata / path}.")
             continue
         try:
             areas = read_iff_table(clientdata / path)[2]
@@ -97,6 +101,7 @@ def _buildouts(clientdata, issues):
                     continue
                 asset = BUILDOUT / scene / (token + ".iff")
                 if not (clientdata / asset).is_file():
+                    report_issue("Buildouts", f"Missing listed client buildout {clientdata / asset}.")
                     continue
                 try:
                     columns, _, rows = read_iff_table(clientdata / asset)
@@ -108,10 +113,12 @@ def _buildouts(clientdata, issues):
                         yield {"scene": scene, "origin": "client_buildout", **point,
                                "source": {"path": "clientdata/" + asset.as_posix(), "row": ordinal}}
                     issues["client_buildout_coordinates_unresolved"] += len(rows) - emitted
-                except CLIENT_ERRORS:
+                except CLIENT_ERRORS as error:
                     issues["unreadable_client_buildout_tables"] += 1
-        except CLIENT_ERRORS:
+                    report_issue("Buildouts", f"Could not read client buildout {clientdata / asset}. {type(error).__name__}.")
+        except CLIENT_ERRORS as error:
             issues["unreadable_client_area_tables"] += 1
+            report_issue("Buildouts", f"Could not read client area table {clientdata / path}. {type(error).__name__}.")
 
 
 def snapshot_points(payload, skipped):
@@ -155,11 +162,12 @@ def snapshot_points(payload, skipped):
     yield from nodes(chunks(scene.require("NODS").body, limit=250_000))
 
 
-def client_map_objects(clientdata, issues):
+def client_map_objects(clientdata, issues, report_issue=None):
     if not clientdata or not clientdata.is_dir():
         return
+    report_issue = report_issue or (lambda *_: None)
     buildout_ids = defaultdict(set)
-    for point in _buildouts(clientdata, issues):
+    for point in _buildouts(clientdata, issues, report_issue):
         buildout_ids[point["scene"]].add(int(point["object_id"]))
         yield point
     for path in sorted((clientdata / "snapshot").glob("*.ws")):
@@ -167,5 +175,6 @@ def client_map_objects(clientdata, issues):
             for index, point in snapshot_points(path.read_bytes(), buildout_ids[path.stem]):
                 yield {"scene": path.stem, "origin": "client_snapshot", **point,
                        "source": {"path": "clientdata/snapshot/" + path.name, "row": index}}
-        except CLIENT_ERRORS:
+        except CLIENT_ERRORS as error:
             issues["unreadable_client_snapshots"] += 1
+            report_issue("Buildouts", f"Could not read client snapshot {path}. {type(error).__name__}.")

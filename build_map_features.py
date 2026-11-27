@@ -163,7 +163,7 @@ def _object_markers(markers, spatial, items, represented, coverage, buildings):
     unresolved = {(point["scene"], point.get("runtime_object_id")) for point in pending}
     parents = defaultdict(list)
     deferred = []
-    for point in client_map_objects(spatial.clientdata, coverage):
+    for point in client_map_objects(spatial.clientdata, coverage, spatial.report_issue):
         buildings.record(point, point["origin"])
         identity = point["scene"], point["object_id"]
         if identity in expected_parents and (point.get("template") or "").startswith(CELL_TEMPLATE):

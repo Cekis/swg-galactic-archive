@@ -81,6 +81,9 @@ class Writer:
                 PRIMARY KEY (kind, id, role, target_kind, target_id)
             ) WITHOUT ROWID;
             CREATE TABLE metadata (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+            CREATE TABLE build_issue (
+                category TEXT NOT NULL, message TEXT NOT NULL, PRIMARY KEY (category, message)
+            ) WITHOUT ROWID;
             CREATE TABLE source_path (path TEXT PRIMARY KEY, remote_path TEXT NOT NULL) WITHOUT ROWID;
         """)
         self.connection.executescript(MAP_INDEX + MAP_LOOKUP + PLACEMENT_SCHEMA)
@@ -146,6 +149,10 @@ class Catalog:
         with self.connect() as db:
             row = db.execute("SELECT data FROM metadata WHERE key='catalog'").fetchone()
         return json.loads(row[0])
+
+    def build_issues(self):
+        with self.connect() as db:
+            return db.execute("SELECT category, message FROM build_issue ORDER BY category, message").fetchall()
 
     def source_path(self, path):
         with self.connect() as db:
