@@ -16,7 +16,7 @@ from catalog_quest_locations import publish_location_quests
 
 
 KINDS = ("quests", "npcs", "locations", "items", "schematics", "resources", "ships", "conversations")
-SCHEMA = 9
+SCHEMA = 10
 SEARCH_INDEX = """CREATE INDEX IF NOT EXISTS entity_search ON entity (kind, search, name COLLATE NOCASE, id)"""
 BROWSE_INDEX = """CREATE INDEX IF NOT EXISTS entity_browse
     ON entity (kind, name COLLATE NOCASE, id, category, status, level, search, card)"""

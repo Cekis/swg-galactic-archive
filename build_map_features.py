@@ -320,7 +320,11 @@ def _map_extent(extent):
 
 def _finish_charts(markers, spatial, places, world):
     markers.flush()
-    for scene in sorted(set(markers.extents) | {ident for ident, place in places.items() if ident == place["scene"]}):
+    scenes = set(markers.extents) | {ident for ident, place in places.items() if ident == place["scene"]}
+    for world_id, scene in SCENE_ALIASES.items():
+        if scene in scenes:
+            world(world_id)
+    for scene in sorted(scenes):
         if scene in SCENE_ALIASES and scene not in markers.extents:
             continue
         entry = world(scene)
@@ -353,7 +357,7 @@ def _finish_charts(markers, spatial, places, world):
     for ident, place in places.items():
         scene = place["scene"]
         if not place.get("map"):
-            chart_scene = SCENE_ALIASES.get(scene, scene)
+            chart_scene = scene if scene in spatial.maps else SCENE_ALIASES.get(scene, scene)
             place["map"] = spatial.maps.get(chart_scene)
             if chart_scene != scene and place["map"]:
                 place["map_scene"] = chart_scene

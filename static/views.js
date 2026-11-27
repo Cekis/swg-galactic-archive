@@ -120,7 +120,7 @@ function rowCells(kind, record, metadata) {
   if (kind === "resources") return [h(record.category), h(record.parent || "—"),
     record.worlds ? integer(record.worlds) : "—"];
   if (kind === "ships") return [h(record.category), tier, integer(record.slots), code(record.template)];
-  if (kind === "locations") return [scene, h(record.category), record.has_map ? tag("Game map", "good") : "—"];
+  if (kind === "locations") return [scene, h(record.category), record.has_map ? tag("Map", "good") : "—"];
   return [integer(record.line_count), record.different ? tag(integer(record.different), "warn") : "—",
     record.missing ? tag(integer(record.missing), "bad") : "—"];
 }
@@ -132,7 +132,7 @@ const featuredWorlds = [
 ];
 
 function worldMaps(metadata) {
-  const otherWorlds = metadata.source_key ? Object.keys(metadata.locations) : [];
+  const otherWorlds = metadata.ground_worlds || [];
   const ids = new Set([...featuredWorlds, ...otherWorlds]);
   const worlds = [];
   for (const id of ids) {

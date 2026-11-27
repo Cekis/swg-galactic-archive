@@ -58,6 +58,10 @@ repository and client assets from an extracted local directory.
   [SWG-Source repositories](https://github.com/SWG-Source), omit the revision
   to follow the default branch. The old client data repository is published
   as [SWG-Source/clientdata_OLD](https://github.com/SWG-Source/clientdata_OLD).
+  This repository supplies some client assets. Original game maps also
+  require `ui/ui_planet_map.inc` and its referenced `texture/ui_map_*.dds`
+  files in the selected client data. A complete extracted client directory
+  can supply those files alongside GitHub server sources.
 - **Local server sources** use their current Git commit by default.
   Set `revision` to select another branch or commit already available in
   the checkout.
@@ -204,8 +208,9 @@ Select it again to reverse the order.
   are shown on their own where the script supplies the roll.
 - **Locations** include worlds, named regions, buildout areas, transport
   points, and the original client's points of interest. The landing page
-  links directly to the major planets and zones with client map thumbnails
-  where available. Each location has a description with sources. The archive
+  links directly to the major planets and selected zones with client map
+  thumbnails where available. Other scenes are available in the location
+  browser. Each location has a description with sources. The archive
   uses the client POI text when present, published lore for known places,
   and local location records for other areas.
   Planet and settlement pages show their child locations in the overview

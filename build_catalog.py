@@ -18,7 +18,7 @@ from catalog_loot import index_npc_loot
 from catalog_dialogue import DialogueIndex
 from catalog_entities import Items, item_ref, load_npcs, load_places, summarize_npc
 from catalog_inventory import publish_inventory
-from catalog_location_hierarchy import LOCATION_ALIASES, canonical_location, publish_location_hierarchy
+from catalog_location_hierarchy import LOCATION_ALIASES, authored_ground_worlds, canonical_location, publish_location_hierarchy
 from catalog_locations import LocationIndex
 from catalog_lore import add_location_descriptions, load_client_landmarks
 from catalog_map import LAYERS
@@ -26,7 +26,7 @@ from catalog_models import ModelLibrary
 from catalog_npc_models import NpcModels
 from catalog_spawns import SpawnIndex
 from catalog_sources import (
-    GAME_MODEL_PATHS, PLANETS, ROOT, ClientStrings, GameFiles, display_id,
+    GAME_MODEL_PATHS, PLANETS, ROOT, SERVER, ClientStrings, GameFiles, display_id,
     distinct, read_iff_table, string_ref,
 )
 
@@ -451,7 +451,8 @@ def write_catalog(writer, profile):
     provenance = {"source_key": profile.key, "sources": profile.metadata()} if profile.key else {}
     return writer.finish({**inventory, **provenance, "title": "Star Wars Galaxies Galactic Archive", "revision": files.revision,
                           "quest_source_counts": manifest["counts"], "origin_scene_records": origin_count,
-                          "locations": filters, "maps": spatial.maps, "map_layers": LAYERS, "map_data": map_data,
+                          "locations": filters, "ground_worlds": authored_ground_worlds(files.tab(SERVER / "region/planets.tab"), places),
+                          "maps": spatial.maps, "map_layers": LAYERS, "map_data": map_data,
                           "dialogue": dict(dialogue_stats),
                           "string_errors": strings.errors,
                           "quests_with_linked_dialogue": sum(bool(value) for value in dialogue.quest_tables.values()),

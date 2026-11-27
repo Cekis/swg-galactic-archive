@@ -250,6 +250,39 @@ class SourceProfileTests(unittest.TestCase):
         self.assertEqual(str(error.exception),
                          "Unable to read branches for AlternateOrg/offline. Git ls-remote failed (exit 128)")
 
+    def test_configured_world_directory_keeps_ground_worlds_and_restores_scene_parents(self):
+        with TemporaryDirectory() as work:
+            root = Path(work)
+            game = root / "game"
+            init(game)
+            server = game / SERVER_PATH
+            registered = ("survey_world", "adventure1", "adventure2", "simple", "tutorial", "dungeon1",
+                          "e3_space_corellia", "space_corellia", "space_ord_mantell", "kashyyyk_main")
+            tab(server / "region/planets.tab", ("planet", "minX", "minZ", "maxX", "maxZ"),
+                ("s", "i", "i", "i", "i"), *((scene, -500, -500, 500, 500) for scene in registered))
+            tab(server / "region/region_adventure2.tab",
+                ("regionName", "geometry", "minX_or_centerX", "minZ_or_centerZ", "maxX_or_radius"),
+                ("s", "s", "f", "f", "f"), ("echo_base", "circle", 20, 30, 50))
+            stf(root / "client/string/en/fixture.stf", name="Fixture")
+            commit(game)
+            config = root / "sources.json"
+            save(config, json.dumps({"sources": {"dsrc": {"path": "game"}, "clientdata": {"path": "client"}}}))
+            profile = load_profile(config, root)
+
+            metadata = build(profile.database, profile)
+            catalog = Catalog(profile.database)
+            self.assertEqual(metadata["ground_worlds"], ["survey_world"])
+            self.assertEqual(metadata["locations"]["hoth"]["map_id"], "adventure2")
+            self.assertEqual(metadata["locations"]["ord_mantell"]["map_id"], "space_ord_mantell")
+            self.assertEqual(catalog.entity("locations", "adventure2")["card"]["id"], "hoth")
+            self.assertEqual([row["id"] for row in catalog.list("locations", query="Hoth", category="World")["rows"]],
+                             ["hoth"])
+            echo_base = catalog.entity("locations", "adventure2/region/3")
+            self.assertEqual([parent["id"] for parent in echo_base["ancestors"]], ["hoth"])
+            ord_space = catalog.entity("locations", "space_ord_mantell")
+            self.assertEqual([parent["id"] for parent in ord_space["ancestors"]], ["ord_mantell"])
+            self.assertEqual(catalog.entity("locations", "space_corellia")["card"]["category"], "Space zone")
+
     def test_building_cells_link_master_scripts_tables_and_dedicated_spawners(self):
         with TemporaryDirectory() as work:
             root = Path(work)

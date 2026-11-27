@@ -17,6 +17,18 @@ def canonical_location(ident):
     return LOCATION_ALIASES.get(ident, ident)
 
 
+def authored_ground_worlds(planet_rows, places):
+    scenes = {row.get("planet") for row in planet_rows if row.get("planet")}
+    worlds = []
+    for scene in sorted(scenes):
+        if scene == "simple" or scene.startswith(("space_", "e3_")) or re.fullmatch(r"(?:tutorial|adventure|dungeon)\d*", scene):
+            continue
+        place = places.get(scene)
+        if place and place["category"] == "World" and place.get("map") and not place.get("lore_parent"):
+            worlds.append(scene)
+    return worlds
+
+
 def _is_city(place):
     attributes = place.get("attributes", {})
     return place["category"] == "Region" and (
