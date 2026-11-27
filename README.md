@@ -52,8 +52,12 @@ repository and client assets from an extracted local directory.
 
 - **GitHub sources** accept a branch name or a full commit SHA in
   `revision`. Omit it to follow the default branch. The Archive resolves
-  branches through GitHub and caches each selected commit locally. Private
-  repositories use your Git credential helper.
+  branches through GitHub and caches each selected commit locally. If a named
+  branch is missing, the error identifies the repository and its default branch. Private
+  repositories use your Git credential helper. When using the upstream
+  [SWG-Source repositories](https://github.com/SWG-Source), omit the revision
+  to follow the default branch. The old client data repository is published
+  as [SWG-Source/clientdata_OLD](https://github.com/SWG-Source/clientdata_OLD).
 - **Local server sources** use their current Git commit by default.
   Set `revision` to select another branch or commit already available in
   the checkout.

@@ -38,7 +38,9 @@ def git_output(checkout, *args, optional=False):
         if optional:
             return None
         message = result.stderr.decode("utf-8", errors="replace").strip()
-        raise ValueError(f"Git {args[0]} failed in {checkout}: {message}")
+        directory = f" in {checkout}" if checkout is not None else ""
+        detail = f": {message}" if message else ""
+        raise ValueError(f"Git {args[0]} failed{directory} (exit {result.returncode}){detail}")
     return result.stdout
 
 
@@ -53,13 +55,28 @@ def github_revision(slug, selector):
         ref = "HEAD"
     else:
         ref = "refs/heads/" + selector.removeprefix("refs/heads/")
-        git_output(None, "check-ref-format", ref)
-    refs = git_output(None, "ls-remote", "--exit-code", f"https://github.com/{slug}.git", ref)
-    for row in refs.decode("ascii").splitlines():
-        revision, branch = row.split("\t", 1)
-        if branch == ref and GIT_SHA.fullmatch(revision):
-            return revision
-    raise ValueError(f"No GitHub revision found for {slug} at {ref}.")
+        if git_output(None, "check-ref-format", ref, optional=True) is None:
+            raise ValueError(f"Invalid Git branch {selector!r} for {slug}.")
+    patterns = ("HEAD",) if ref == "HEAD" else ("HEAD", ref)
+    try:
+        refs = git_output(None, "ls-remote", "--symref", f"https://github.com/{slug}.git", *patterns)
+    except ValueError as error:
+        raise ValueError(f"Unable to read branches for {slug}. {error}") from error
+
+    default_branch = None
+    for row in refs.decode("utf-8").splitlines():
+        value, _, label = row.partition("\t")
+        if label == ref and GIT_SHA.fullmatch(value):
+            return value
+        if label == "HEAD" and value.startswith("ref: refs/heads/"):
+            default_branch = value.removeprefix("ref: refs/heads/")
+    if ref == "HEAD":
+        raise ValueError(f"{slug} has no default branch with a commit.")
+    branch = ref.removeprefix("refs/heads/")
+    message = f"{slug} has no branch named {branch!r}."
+    if default_branch:
+        message += f" Its default branch is {default_branch!r}. Omit revision to follow it."
+    raise ValueError(message)
 
 
 def github_checkout(slug, revision, cache):

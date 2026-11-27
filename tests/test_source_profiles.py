@@ -17,7 +17,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from archive_config import load_profile
+from archive_config import github_revision, load_profile
 from build_catalog import build
 from build_deployment import describe_assets, github_assets, local_source_zip, write_package
 from catalog_db import Catalog
@@ -184,6 +184,7 @@ class SourceProfileTests(unittest.TestCase):
             root = Path(work)
             game = root / "upstream"
             init(game)
+            git(game, "symbolic-ref", "HEAD", "refs/heads/archive-default")
             quest(game, "quest_one", 3)
             before = commit(game)
             branch = git(game, "symbolic-ref", "--short", "HEAD")
@@ -228,6 +229,26 @@ class SourceProfileTests(unittest.TestCase):
             self.assertFalse(quest_file(latest, "quest_one").exists())
             self.assertTrue(quest_file(latest, "quest_two").is_file())
             self.assertTrue(quest_file(original, "quest_one").is_file())
+
+            sources = json.loads(config.read_text(encoding="utf-8"))
+            sources["sources"]["dsrc"]["revision"] = "missing-archive-branch"
+            save(config, json.dumps(sources))
+            message = f"AlternateOrg/branch-test has no branch named 'missing-archive-branch'. Its default branch is {branch!r}."
+            with self.assertRaises(RuntimeError) as missing:
+                select_revision()
+            self.assertIn(message, str(missing.exception))
+
+            del sources["sources"]["dsrc"]["revision"]
+            save(config, json.dumps(sources))
+            self.assertEqual(select_revision(), (after, latest, key))
+
+    def test_git_failure_with_empty_stderr_is_distinct_from_a_missing_branch(self):
+        failure = subprocess.CompletedProcess(["git", "ls-remote"], 128, b"", b"")
+        with patch("archive_config.subprocess.run", return_value=failure):
+            with self.assertRaises(ValueError) as error:
+                github_revision("AlternateOrg/offline", None)
+        self.assertEqual(str(error.exception),
+                         "Unable to read branches for AlternateOrg/offline. Git ls-remote failed (exit 128)")
 
     def test_selected_github_repository_keeps_paths_in_an_extracted_deployment(self):
         with TemporaryDirectory() as work:
