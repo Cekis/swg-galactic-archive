@@ -18,6 +18,7 @@ from catalog_map import AREA_LAYERS, LAYERS, bounds_from_query
 from catalog_model_previews import render_model_profile
 from catalog_models import ModelLibrary
 from catalog_provenance import SourceCatalog, valid_source
+from catalog_client_assets import ClientAssetPath
 from catalog_sources import GAME_MODEL_PATHS
 
 
@@ -72,7 +73,7 @@ class ArchiveServer(ThreadingHTTPServer):
                 chart["grid_area_layers"] = catalog.map_area_counts(scene, chart["grid_bounds"])
             if chart.get("cities"):
                 chart["cities"] = catalog.with_map_details(scene, chart["cities"])
-        clientdata, client_tools = profile.root("clientdata"), profile.root("client-tools")
+        clientdata, client_tools = profile.clientdata, profile.root("client-tools")
         self.maps = MapLibrary(clientdata)
         self.models = ModelLibrary(clientdata, client_tools,
                                    (profile.root("game-data") / path for path in GAME_MODEL_PATHS),
@@ -313,7 +314,11 @@ def main():
             parser.error("Run build_catalog.py with the selected source configuration before starting the server.")
         catalog = Catalog(database)
         metadata = catalog.metadata()
-        if metadata.get("schema") != SCHEMA or (not packaged and metadata.get("source_key") != profile.key):
+        client = profile.clientdata
+        signature = client.installation.signature if isinstance(client, ClientAssetPath) else None
+        if metadata.get("schema") != SCHEMA or (not packaged and (
+            metadata.get("source_key") != profile.key or metadata.get("client_installation") != signature
+        )):
             parser.error("Rebuild the catalog with build_catalog.py for the current source configuration.")
     except (OSError, ValueError) as error:
         parser.error(str(error))

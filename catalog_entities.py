@@ -2,7 +2,6 @@
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-import os
 from pathlib import Path, PurePosixPath
 import re
 
@@ -53,11 +52,9 @@ def client_object_inventory(clientdata):
     object_root = clientdata / "object"
     inventory = {}
     for group in (*ITEM_ROOTS, *STATIC_ITEM_DIRS, "ship"):
-        for directory, _, filenames in os.walk(object_root / group):
-            for filename in filenames:
-                if filename.lower().endswith(".iff"):
-                    path = Path(directory) / filename
-                    inventory[path.relative_to(clientdata).as_posix().lower()] = path
+        for path in (object_root / group).rglob("*"):
+            if path.suffix.lower() == ".iff" and path.is_file():
+                inventory[path.relative_to(clientdata).as_posix().lower()] = path
     return inventory
 
 

@@ -14,6 +14,7 @@ from archive_config import PROJECT, SourceRepository, add_source_options, select
 from archive_quests.manifest import manifest as generate_manifest
 
 from build_map_features import build_map_features
+from catalog_client_assets import ClientAssetPath
 from catalog_db import SCHEMA, Catalog, Writer
 from catalog_drops import index_drops
 from catalog_loot import index_npc_loot
@@ -414,7 +415,11 @@ def report_coverage(issues, map_data, model_coverage, strings):
 
 
 def write_catalog(writer, profile, issues):
-    clientdata, client_tools = profile.root("clientdata"), profile.root("client-tools")
+    clientdata, client_tools = profile.clientdata, profile.root("client-tools")
+    if isinstance(clientdata, ClientAssetPath):
+        installed = clientdata.installation
+        print(f"Reading {installed.archive_count} TREs through {installed.index_count} configured TOCs at {clientdata}",
+              flush=True)
     strings = ClientStrings(clientdata, client_tools)
     if not strings.roots:
         raise ValueError(f"English STF files not found in {clientdata} or {client_tools}")
@@ -504,6 +509,8 @@ def write_catalog(writer, profile, issues):
                        **({"alias_for": LOCATION_ALIASES[ident]} if ident in LOCATION_ALIASES else {})}
                for ident, place in sorted(places.items()) if place["scene"] == ident}
     provenance = {"source_key": profile.key, "sources": profile.metadata()} if profile.key else {}
+    if isinstance(clientdata, ClientAssetPath):
+        provenance["client_installation"] = clientdata.installation.signature
     report_coverage(issues, map_data, model_coverage, strings)
     writer.connection.executemany("INSERT INTO build_issue VALUES (?,?)", sorted(issues.entries))
     return writer.finish({**inventory, **provenance, "build_issue_count": len(issues.entries), "title": "Star Wars Galaxies Galactic Archive", "revision": files.revision,
@@ -554,8 +561,10 @@ def main():
             if args.if_needed and database.is_file():
                 catalog = Catalog(database)
                 recorded = catalog.metadata()
+                selected = profile.clientdata
+                signature = selected.installation.signature if isinstance(selected, ClientAssetPath) else None
                 if (recorded.get("source_key") == profile.key and recorded.get("schema") == SCHEMA
-                        and "build_issue_count" in recorded):
+                        and recorded.get("client_installation") == signature and "build_issue_count" in recorded):
                     print(f"Reusing catalog {database}", flush=True)
                     for issue in catalog.build_issues():
                         print_build_issue(*issue)

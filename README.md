@@ -26,7 +26,7 @@ paths can use forward slashes, as in `F:/SWGProjects/my-server`.
 | Input | What it supplies |
 | --- | --- |
 | `dsrc` | Required Git checkout containing `sku.0/sys.server/compiled/game`. The indexer reads server and shared datatables, scripts, and object templates at the selected commit. |
-| `clientdata` | Required extracted client data in its original layout, with directories such as `object/`, `appearance/`, and `texture/`. This supplies maps, models, icons, and compiled tables. |
+| `clientdata` | A valid SWG client installation or an extracted asset directory. This supplies maps, models, icons, strings, and compiled tables. |
 | `client-tools` | Optional supplemental client assets. English STF files here take precedence over `clientdata/string/en`. One of those inputs must contain the English strings. |
 | `src` | Optional native source checkout for code references. |
 | `game-data` | Optional staged, compiled `data` directory for additional model files. |
@@ -38,14 +38,14 @@ inside the selected repository. In a split `dsrc` checkout, `sku.0/`
 is typically at the repository root.
 
 This example reads server code and data from subdirectories of one GitHub
-repository and client assets from an extracted local directory.
+repository and assets directly from a local SWG client installation.
 
 ~~~json
 {
   "sources": {
     "src": {"github": "your-organization/swg-server", "revision": "main", "subdirectory": "src"},
     "dsrc": {"github": "your-organization/swg-server", "revision": "main", "subdirectory": "dsrc"},
-    "clientdata": {"path": "../../game-inputs/clientdata"}
+    "clientdata": {"path": "C:/Games/Star Wars Galaxies"}
   }
 }
 ~~~
@@ -65,9 +65,15 @@ repository and client assets from an extracted local directory.
 - **Local server sources** use their current Git commit by default.
   Set `revision` to select another branch or commit already available in
   the checkout.
-- **Local client assets** are read from the directory you select. If you
-  specify a Git revision for one of those asset directories, check out
-  that revision before using it.
+- **Client installation** points at the folder that contains `client.cfg`
+  and the configured TOC and TRE archives. The Archive follows the client's
+  `SharedFile` search settings and reads the indexed assets in place. Files in
+  a standard installation's root can override archived copies. The Archive
+  indexes all configured SKUs.
+- **Extracted client assets** can use the same `clientdata.path` field. Point
+  it at the root containing `object/`, `appearance/`, `texture/`, and the other
+  asset directories. If you specify a Git revision for a loose asset directory,
+  check out that revision before using it.
 
 The indexer generates the quest manifest from the selected data and scripts.
 An optional top-level `quest_annotations` path can supply manually
@@ -106,8 +112,9 @@ python -B build_catalog.py --sources .local/sources.json
 python -B serve.py --sources .local/sources.json
 ~~~
 
-On Windows, `./start.ps1 -Rebuild` does both. Use it after changing
-loose client assets even when the selected Git revisions are the same.
+On Windows, `./start.ps1 -Rebuild` does both. Changes to a configured
+client's archive set or configuration refresh the catalog on the next start.
+Use `-Rebuild` after changing loose client assets.
 
 Each build invocation clears `.local/build.log` and mirrors its progress and
 warnings to stdout. Warnings identify missing map assets, buildout and portal

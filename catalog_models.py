@@ -1,4 +1,4 @@
-"""Read SWG display assets from the supplied, extracted client files.
+"""Read SWG display assets from the supplied client data.
 
 The binary layouts follow the client-tools Iff, SkeletalAppearanceTemplate,
 SkeletalMeshGeneratorTemplate, BasicSkeletonTemplate, and
@@ -16,6 +16,8 @@ import math
 from pathlib import Path, PurePosixPath
 import re
 import struct
+
+from catalog_client_assets import resolve_asset_path
 
 
 ASSET_NAME = re.compile(r"[a-z0-9_/. -]+")
@@ -547,7 +549,7 @@ class ModelLibrary:
     def __init__(self, clientdata: Path, client_tools: Path | None = None, asset_roots=(), *,
                  asset_overlay: Path | None = None, report_issue=None):
         self.report_issue = report_issue or (lambda *_: None)
-        self.root = Path(clientdata).resolve()
+        self.root = resolve_asset_path(clientdata)
         self.client_tools = Path(client_tools).resolve() if client_tools else None
         candidates = [self.root]
         if asset_overlay is not None:

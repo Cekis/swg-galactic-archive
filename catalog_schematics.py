@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import re
 import struct
 
+from catalog_client_assets import resolve_asset_path
 from catalog_sources import (
     SCRIPTS, SERVER, SERVER_OBJECTS, SHARED, SHARED_OBJECTS, display_id, number, source,
 )
@@ -744,7 +745,7 @@ class ClientTemplates:
 def _load_client_schematics(root, client_inventory, reader, strings, schematics):
     if not root:
         return
-    root = Path(root).resolve()
+    root = resolve_asset_path(root)
     templates = ClientTemplates(root)
     evidence_rank = {"reference_only", "client_reference", "table_recipe"}
     for raw in sorted(_client_candidates(root, client_inventory)):

@@ -7,10 +7,12 @@ from importlib.metadata import version
 from io import BytesIO
 import json
 from pathlib import Path, PurePosixPath
+from shutil import copyfileobj
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 from zlib import crc32
 
 from archive_config import PROJECT, SourceRepository, add_source_options, select_profile
+from catalog_client_assets import ClientAssetPath
 from catalog_db import Catalog, packed
 from catalog_provenance import HASH, SourceCatalog, TEXT_TYPES, UPSTREAM_INDEX, valid_source
 from deployment_assets import BLOCK, MANIFEST, file_hash
@@ -20,7 +22,8 @@ from serve import ASSETS
 
 
 def trace(catalog, profile, checkpoint=None):
-    client, tools, game_data = (profile.root(role) for role in ("clientdata", "client-tools", "game-data"))
+    client = profile.clientdata
+    tools, game_data = (profile.root(role) for role in ("client-tools", "game-data"))
     overlay = profile.overlay
     stat = catalog.path.stat()
     identity = {"database": str(catalog.path), "size": stat.st_size, "modified": stat.st_mtime_ns,
@@ -31,8 +34,13 @@ def trace(catalog, profile, checkpoint=None):
         previous = json.loads(checkpoint.read_text(encoding="utf-8"))
         if previous["paths"] != identity:
             raise ValueError("The catalog or source selection changed since the asset trace was created.")
+        def traced_source(row):
+            if isinstance(client, ClientAssetPath) and row["dest"].startswith("clientdata/"):
+                return client / row["dest"].removeprefix("clientdata/")
+            return Path(row["source"]).resolve()
+
         assets = asset_destinations(
-            {(row["ref"], Path(row["source"]).resolve()) for row in previous["assets"]},
+            {(row["ref"], traced_source(row)) for row in previous["assets"]},
             client, tools, game_data, overlay,
         )
         for row in previous["assets"]:
@@ -185,7 +193,12 @@ def write_package(path, mode, files, assets, database, db_checksum, identity, lo
         bundle.writestr(MANIFEST, packed(manifest).encode("utf-8"))
         for item in rows:
             if item["bundled"]:
-                bundle.write(files[item["path"]][1], item["path"])
+                native = files[item["path"]][1]
+                if isinstance(native, ClientAssetPath):
+                    with native.open("rb") as source, bundle.open(item["path"], "w") as target:
+                        copyfileobj(source, target)
+                else:
+                    bundle.write(native, item["path"])
         unpacked = sum(item.file_size for item in bundle.infolist())
     pending.replace(path)
     referenced = [item for item in rows if not item["bundled"]]

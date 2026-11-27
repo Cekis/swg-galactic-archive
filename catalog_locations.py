@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from catalog_client_assets import resolve_asset_path
 from catalog_sources import ROOT, SERVER, SHARED, read_iff_table, source
 from catalog_iff import block_positions, form
 
@@ -77,7 +78,7 @@ class MapLibrary:
     """Serve decoded game map textures from persisted map metadata."""
 
     def __init__(self, clientdata, maps=None):
-        self.clientdata = Path(clientdata).resolve() if clientdata else None
+        self.clientdata = resolve_asset_path(clientdata) if clientdata else None
         self.maps = maps or {}
 
     def map_image(self, metadata, *, thumbnail=False):
@@ -96,7 +97,7 @@ class MapLibrary:
             return None
         try:
             from PIL import Image
-            with Image.open(path) as original:
+            with path.open("rb") as data, Image.open(data) as original:
                 if original.width > 4096 or original.height > 4096:
                     return None
                 image = original.convert("RGBA")
@@ -254,7 +255,7 @@ class LocationIndex:
 
     def __init__(self, files, clientdata: Path | None = None, *, report_issue=None):
         self.files = files
-        self.clientdata = Path(clientdata).resolve() if clientdata else None
+        self.clientdata = resolve_asset_path(clientdata) if clientdata else None
         self.report_issue = report_issue or (lambda *_: None)
         self.areas = self._read_areas()
         self._authored_mobs = {row.get("creatureName") for row in self._table(SERVER / "mob/creatures.tab")}

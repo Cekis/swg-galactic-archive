@@ -1,6 +1,7 @@
 """Resolve the source repositories and workspace for an Archive configuration."""
 
 from dataclasses import dataclass
+from functools import cached_property
 from hashlib import sha256
 import json
 import os
@@ -8,6 +9,8 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 from tempfile import TemporaryDirectory
+
+from catalog_client_assets import ClientAssetPath, client_asset_root
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -179,6 +182,11 @@ class ArchiveProfile:
     key: str | None = None
     quest_annotations: bytes | None = None
     legacy_game: Path | None = None
+    client_source: Path | ClientAssetPath | None = None
+
+    @cached_property
+    def clientdata(self):
+        return self.client_source or client_asset_root(self.root("clientdata"))
 
     @property
     def database(self):
@@ -256,9 +264,12 @@ def load_profile(path, project=PROJECT):
             raise ValueError("quest_annotations must be a file path relative to the configuration or an absolute path.")
         annotations = (path.parent / Path(annotation_file).expanduser()).read_bytes()
     identity = {role: (str(repo.root), repo.revision, repo.github) for role, repo in repos.items()}
+    clientdata = client_asset_root(repos["clientdata"].root)
+    if isinstance(clientdata, ClientAssetPath):
+        identity["client_installation"] = clientdata.installation.signature
     fingerprint = sha256(json.dumps(identity, sort_keys=True).encode() + (annotations or b"")).hexdigest()
     profile_directory = sha256(str(path).encode()).hexdigest()[:20]
-    return ArchiveProfile(repos, local / "profiles" / profile_directory, fingerprint, annotations)
+    return ArchiveProfile(repos, local / "profiles" / profile_directory, fingerprint, annotations, client_source=clientdata)
 
 
 def legacy_game(project=PROJECT):
@@ -281,7 +292,7 @@ def legacy_asset(directory, environment, project=PROJECT):
 def add_source_options(parser):
     parser.add_argument("--sources", type=Path, help="Source configuration (defaults to .local/sources.json).")
     parser.add_argument("--database", type=Path, help="Override the selected configuration's catalog file.")
-    parser.add_argument("--clientdata", type=Path, help="Extracted client assets for legacy catalogs.")
+    parser.add_argument("--clientdata", type=Path, help="SWG client installation or extracted client assets for legacy catalogs.")
     parser.add_argument("--client-tools", type=Path, help="Client tools for legacy catalogs.")
 
 

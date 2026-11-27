@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import re
 import struct
 
+from catalog_client_assets import resolve_asset_path
 from catalog_models import ModelError, ModelLibrary, chunks, descendant, normalize_ref, value
 from catalog_sources import (
     SERVER, SERVER_OBJECTS, SHARED, SHARED_OBJECTS, SCRIPTS, display_id, number, read_iff_table, source,
@@ -256,7 +257,7 @@ def _table(files, path, key):
 
 def _client_chassis(clientdata):
     try:
-        _, _, rows = read_iff_table(Path(clientdata) / CHASSIS_CLIENT)
+        _, _, rows = read_iff_table(resolve_asset_path(clientdata) / CHASSIS_CLIENT)
         return {row["name"]: (row, {**_asset_source(CHASSIS_CLIENT), "row": index})
                 for index, row in enumerate(rows, 1) if str(row.get("name", "")).startswith("player_")}
     except (OSError, AssertionError, ValueError, KeyError, struct.error):

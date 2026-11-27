@@ -284,7 +284,7 @@ def main():
     catalog = Catalog(args.database or profile.database)
     if catalog.metadata().get("source_key") != profile.key:
         parser.error("Rebuild the catalog with the selected source configuration before recovering model assets.")
-    clientdata, tools = profile.root("clientdata"), profile.root("client-tools")
+    clientdata, tools = profile.clientdata, profile.root("client-tools")
     overlay = args.overlay or profile.overlay
     report_path = args.report or profile.state / "model-recovery/item-model-coverage.json"
     if args.seed:

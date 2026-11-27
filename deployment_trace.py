@@ -179,10 +179,10 @@ def asset_destinations(files, client, tools, game_data, overlay):
     roots = ((overlay, Path(".local/model-assets")), (client, Path("clientdata")),
              (tools, Path("client-tools")), (game_data, Path("game/data")))
     output = {}
-    for ref, path in sorted(files):
+    for ref, path in sorted(files, key=lambda entry: (entry[0], str(entry[1]))):
         for root, dest in roots:
-            if path.is_relative_to(root):
-                relative = (dest / path.relative_to(root)).as_posix().lower()
+            if path.is_relative_to(str(root)):
+                relative = (dest / path.relative_to(str(root))).as_posix().lower()
                 if not relative.endswith("/" + ref):
                     raise ValueError(f"Unexpected native asset spelling for {path}")
                 if relative in output and output[relative] != (ref, path):
