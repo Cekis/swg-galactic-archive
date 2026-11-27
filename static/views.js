@@ -303,15 +303,25 @@ function requirements(rules) {
   }).join("")}</ul>`;
 }
 
-function rewards(entries) {
+function questRewardNames(entity) {
+  return new Map((entity.related.reward_items?.rows || [])
+    .filter(entry => entry.card).map(entry => [entry.id, entry.card.name]));
+}
+
+function itemReward(reward, itemNames) {
+  const id = reward.item_id.trim().replaceAll("\\", "/").toLowerCase();
+  const item = itemNames.has(id) ? link("items", id, itemNames.get(id)) : code(reward.item_id);
+  return item + (reward.count > 1 ? " × " + integer(reward.count) : "");
+}
+
+function rewards(entries, itemNames) {
   if (!entries.length) return '<p class="muted">No explicit reward was recovered.</p>';
   return entries.map(reward => {
     const amount = reward.amount == null ? "Variable" : integer(reward.amount);
     let content;
     if (reward.kind === "credits") content = h(amount) + " credits";
     else if (reward.kind === "experience") content = `${integer(reward.base_amount ?? reward.amount)} XP${reward.base_amount != null ? " base" : ""} · ${h(reward.xp_type)}`;
-    else if (reward.kind === "item" && reward.item_id) content = link("items", reward.item_id, reward.item?.text || reward.item_id)
-      + (reward.count > 1 ? " × " + integer(reward.count) : "");
+    else if (reward.kind === "item" && reward.item_id) content = itemReward(reward, itemNames);
     else if (reward.kind === "faction") content = `${h(amount)} standing · ${h(reward.faction)}`;
     else content = h(reward.description || readable(reward.kind)) + (reward.item_id ? " " + code(reward.item_id) : "");
     const detail = [readable(reward.timing), reward.selection && readable(reward.selection),
@@ -355,7 +365,7 @@ function questOverview(entity, metadata) {
     ${section("Journal entry", localized(details.description, "The journal description is unresolved."))
       + (details.completion_summary?.text ? section("Completion summary", localized(details.completion_summary)) : "")
       + section("Requirements", requirements(data.requirements))
-      + section("Rewards", rewards(data.rewards))
+      + section("Rewards", rewards(data.rewards, questRewardNames(entity)))
       + issues(data)}
     </div><aside class="stack">${section("Starts at", questStarts(entity, metadata))
       + section("Quest facts", facts([["Family", h(entity.card.category)], ["Recommended level", integer(entity.card.level)],
@@ -367,15 +377,22 @@ function questOverview(entity, metadata) {
 function questObjectives(entity, metadata) {
   const data = entity.data;
   const mission = data.detail.authored_mission;
-  const objectives = data.detail.steps.map((step, index) => `<details${index === 0 ? " open" : ""}>
+  const itemNames = questRewardNames(entity);
+  const taskRewards = data.rewards.filter(reward => reward.kind === "item" && reward.item_id && reward.task != null);
+  const objectives = data.detail.steps.map((step, index) => {
+    const items = taskRewards.filter(reward => reward.task === step.index)
+      .map(reward => itemReward(reward, itemNames)).join("<br>");
+    return `<details${index === 0 ? " open" : ""}>
       <summary>${step.index + 1}. ${h(step.title.text || readable(step.id))}${!step.visible ? " · Hidden task" : ""}</summary>
       ${localized(step.title && !step.title.text ? step.title : { code: step.title?.code })}
       ${localized(step.description, "The objective text is unresolved.")}
       ${facts([["Task ID", code(step.id)], ["Scene", step.scene && locationLink(step.scene, metadata)],
         ["Handler", step.script && code(step.script)], ["After tasks", h(step.after)],
-        ["Excluded tasks", h(step.exclusions)], ["On completion", h(step.on_complete)], ["On failure", h(step.on_failure)]])}
+        ["Excluded tasks", h(step.exclusions)], ["On completion", h(step.on_complete)], ["On failure", h(step.on_failure)],
+        ["Item rewards", items]])}
       ${Object.keys(step.attributes).length ? `<details><summary>Authored task fields</summary>${plainObject(step.attributes)}</details>` : ""}
-      ${sourceText(step.source)}</details>`).join("");
+      ${sourceText(step.source)}</details>`;
+  }).join("");
   return `<div class="stack">${section("Objectives", objectives || '<p class="muted">No task rows were recovered.</p>')}
     ${mission?.fields ? section("Authored mission data", plainObject(mission.fields) + sourceText(mission.source)) : ""}
     ${data.objective_scenes.length ? section("Objective locations", '<ul class="quiet-list">' +

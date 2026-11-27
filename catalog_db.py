@@ -302,7 +302,8 @@ class Catalog:
             grouped = {}
             for role, count in db.execute("SELECT role,COUNT(*) FROM link WHERE kind=? AND id=? GROUP BY role",
                                           (kind, ident)):
-                grouped[role] = {"count": count, "rows": self._links(db, kind, ident, role, 1, 60)}
+                limit = count if kind == "quests" and role == "reward_items" else 60
+                grouped[role] = {"count": count, "rows": self._links(db, kind, ident, role, 1, limit)}
             if kind == "conversations" and not include_dialogue:
                 data.pop("lines", None)
             result = {"card": card, "data": data, "related": grouped}

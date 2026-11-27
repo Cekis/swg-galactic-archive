@@ -5,12 +5,14 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+from urllib.parse import quote
 from zipfile import ZipFile
 
 from PIL import Image
@@ -107,6 +109,62 @@ def model_assets(root, texture):
 
 
 class SourceProfileTests(unittest.TestCase):
+    def test_quest_reward_links_use_the_catalog_item_on_the_correct_objective(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required to render the quest view in this test.")
+        with TemporaryDirectory() as work:
+            root = Path(work)
+            game = root / "game"
+            init(game)
+            summary_item = "object/tangible/quest/award.iff"
+            task_item = "object/tangible/quest/cybernetic_arm.iff"
+            tab(quest_file(game, "reward_fixture"),
+                ("JOURNAL_ENTRY_TITLE", "LEVEL", "QUEST_REWARD_ITEM", "QUEST_REWARD_COUNT"), ("s", "i", "s", "i"),
+                ("@quest_n:fixture", 5, summary_item, 1))
+            tab(game / SHARED_PATH / "questtask/quest/reward_fixture.tab",
+                ("ATTACH_SCRIPT", "TASK_NAME", "JOURNAL_ENTRY_TITLE", "IS_VISIBLE", "ITEM", "COUNT"),
+                ("s", "s", "s", "b", "s", "i"),
+                ("quest.task.ground.wait_for_signal", "ready", "@quest_n:ready", 1, "", 0),
+                ("quest.task.ground.reward", "issue_arm", "@quest_n:issue_arm", 0,
+                 task_item.upper().replace("/", "\\"), 2))
+            commit(game)
+            stf(root / "client/string/en/quest_n.stf", fixture="Reward quest", ready="Prepare", issue_arm="Reward issued")
+            config = root / "sources.json"
+            save(config, json.dumps({"sources": {"dsrc": {"path": "game"}, "clientdata": {"path": "client"}}}))
+            profile = load_profile(config, root)
+            build(profile.database, profile)
+            catalog = Catalog(profile.database)
+            entity = catalog.entity("quests", "quest/reward_fixture")
+            task_name = catalog.entity("items", task_item)["card"]["name"]
+
+            module = root / "renderer"
+            save(module / "package.json", '{"type":"module"}')
+            static = Path(__file__).resolve().parents[1] / "static"
+            for name in ("views.js", "ui.js", "inventory-views.js"):
+                shutil.copyfile(static / name, module / name)
+            script = """
+                import { readFileSync } from "node:fs";
+                import { entityPage } from "./views.js";
+                const { quest, metadata } = JSON.parse(readFileSync(0, "utf8"));
+                const render = view => entityPage("quests", quest, view, metadata).html;
+                process.stdout.write(JSON.stringify([render("overview"), render("objectives")]));
+            """
+            rendered = subprocess.run([node, "--input-type=module", "-e", script], cwd=module,
+                                      input=json.dumps({"quest": entity, "metadata": catalog.metadata()}),
+                                      capture_output=True, encoding="utf-8")
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            overview, objectives = json.loads(rendered.stdout)
+            task_href = "/items/" + quote(task_item, safe="")
+            summary_href = "/items/" + quote(summary_item, safe="")
+            link = f'<a href="{task_href}">{task_name}</a>'
+            self.assertIn(link, overview)
+            self.assertIn(summary_href, overview)
+            before, reward_step = objectives.split("Reward issued", 1)
+            self.assertNotIn(task_href, before)
+            self.assertNotIn(summary_href, objectives)
+            self.assertIn(f"{link} × 2", reward_step)
+
     def test_build_log_is_refreshed_and_mirrored_when_reusing_the_catalog(self):
         with TemporaryDirectory() as work:
             root = Path(work)
