@@ -234,7 +234,7 @@ export function browsePage(kind, filters, result, metadata) {
     </div>${table}${pagination(result, "browse-page")}</section></div>`;
 }
 
-function tabsFor(kind, entity) {
+function tabsFor(kind, entity, spawnCount) {
   const { related, data } = entity;
   const count = key => related[key]?.count || null;
   if (kind === "quests") return [["overview", "Overview"], ["objectives", "Objectives", data.detail.steps.length],
@@ -244,7 +244,8 @@ function tabsFor(kind, entity) {
     ...(entity.has_loot ? [["loot", "Loot"]] : []),
     ["dialogue", "Dialogue", count("dialogue")], ["model", "Model"]];
   if (kind === "locations" && data.category === "Building") return [
-    ["overview", "Cells and contents", data.cells.length], ["locations", "Locations", entity.placement_count],
+    ["overview", "Cells and contents", data.cells.length], ["spawns", "Spawns", spawnCount],
+    ["locations", "Locations", entity.placement_count],
     ["quests", "Quests", count("quests")], ["map", "World map"], ["model", "Model"],
   ];
   if (kind === "locations") return [["overview", "Overview"], ["npcs", "NPCs", count("npcs")],
@@ -265,7 +266,7 @@ function tabsFor(kind, entity) {
   return [["overview", "Lines", entity.card.line_count], ["references", "References"]];
 }
 
-function detailHeader(kind, entity, active, metadata) {
+function detailHeader(kind, entity, active, metadata, tabs) {
   const { card, data } = entity;
   const title = sections[kind].single;
   const category = card.category ? tag(card.category) : "";
@@ -283,7 +284,7 @@ function detailHeader(kind, entity, active, metadata) {
     <header class="detail-title${kind === "locations" ? " location-title" : ""}">${data.journal?.category?.text ? `<p class="detail-kicker">${h(data.journal.category.text)}</p>` : ""}<h1>${h(card.name)}</h1>
     <p class="entry-id">${card.id.endsWith(".iff") ? code(card.id) : h(card.id)}</p><div class="detail-tags">${category + actualLevel + minimum + origin + historical}</div></header>
     <nav class="detail-tabs" aria-label="${title} views">
-    ${tabsFor(kind, entity).map(([id, name, count]) => `<a href="${href(kind, card.id)}${id === "overview" ? "" : "?view=" + id}"
+    ${tabs.map(([id, name, count]) => `<a href="${href(kind, card.id)}${id === "overview" ? "" : "?view=" + id}"
     ${active === id ? ' aria-current="page"' : ""}>${name}${count ? ` <span class="count-label">${integer(count)}</span>` : ""}</a>`).join("")}</nav>`;
 }
 
@@ -598,7 +599,34 @@ function buildingContents(contents, roomIndex = null) {
     }).join("")}</tbody></table></div>`;
 }
 
-function buildingOverview({ data, related }, metadata) {
+function buildingSpawnRooms(data) {
+  const rooms = [...data.cells, ...Object.entries(data.unresolved_cells || {}).map(([name, contents]) => ({ name, contents }))];
+  return rooms.map(({ name, index, contents }) => ({
+    name, index, contents: contents.filter(object => object.origin === "building_spawn" || object.spawner),
+  })).filter(room => room.contents.length);
+}
+
+function buildingSpawnScripts(rooms) {
+  const scripts = new Map();
+  for (const { contents } of rooms) {
+    for (const { spawn_origin: origin } of contents) {
+      if (origin?.type === "Building master spawner" && !scripts.get(origin.script)) {
+        scripts.set(origin.script, origin.script_source);
+      }
+    }
+  }
+  return scripts.size ? section("Building spawn scripts", `<ul class="quiet-list">${[...scripts].map(([script, proof]) =>
+    `<li>${sourceText(proof) || h(script)}</li>`).join("")}</ul>`) : "";
+}
+
+function buildingSpawnsView(rooms) {
+  if (!rooms.length) return section("Spawns by cell", '<p class="muted">No spawn records were recovered for this building.</p>');
+  return `<div class="stack">${buildingSpawnScripts(rooms)}${section("Spawns by cell", rooms.map(room =>
+    `<h3>${h(readable(room.name))}${room.index == null ? " · Unresolved cell" : ""}</h3>${buildingContents(room.contents)}`
+  ).join(""))}</div>`;
+}
+
+function buildingOverview({ data, related }, metadata, spawnRooms, spawnCount) {
   const total = data.cells.reduce((sum, room) => sum + room.contents.length, 0);
   const travel = related.travel?.rows[0]?.id;
   const unresolved = Object.entries(data.unresolved_cells || {});
@@ -620,12 +648,16 @@ function buildingOverview({ data, related }, metadata) {
     ["Location", `<a href="${href("locations", data.id)}?view=locations">View building location</a>`],
     ["Travel", travel && link("locations", travel, "View travel information")],
     ["World footprint", data.bounds && worldBounds(data.bounds)], ["Cells", integer(data.cells.length)],
-    ["Objects in cells", integer(total)], ["Template", code(data.template)],
+    ["Objects in cells", integer(total)], ["Spawns", spawnCount ?
+      `<a href="${href("locations", data.id)}?view=spawns">View ${integer(spawnCount)} spawn records</a>` : null],
+    ["Template", code(data.template)],
     ["Portal layout", data.layout_asset && code(data.layout_asset)],
     ["Event", h(readable(data.required_event))],
     ["Footprint source", data.geometry_source ? h(data.geometry_kind) + sourceText(data.geometry_source) : "Exterior outline unavailable"],
   ]) + (data.layout_mismatch ? '<p class="muted">The supplied portal layout and the placement have different CRCs. Recorded cell slots are shown.</p>' : ""));
-  const cells = data.cells.map((room, index) => `<details class="building-room" id="building-cell-${room.index}"${index === 0 ? " open" : ""}>
+  const openRoom = spawnRooms.find(room => room.index != null)?.index ??
+    data.cells.find(room => room.contents.length)?.index ?? data.cells[0]?.index;
+  const cells = data.cells.map(room => `<details class="building-room" id="building-cell-${room.index}"${room.index === openRoom ? " open" : ""}>
       <summary><strong>${h(readable(room.name))}</strong><span>Cell ${integer(room.index)} · ${integer(room.contents.length)} objects</span></summary>
       <div class="building-room-meta">
         <span>Origin ${worldCoordinates(room.origin)}</span>
@@ -634,7 +666,7 @@ function buildingOverview({ data, related }, metadata) {
       </div>${buildingContents(room.contents, room.index)}</details>`).join("");
   return `<div class="stack">
     <div class="article-grid"><div class="stack">${plan || section("Floor plan", '<p class="muted">Floor geometry is unavailable for this placement.</p>')}</div>
-      <aside class="stack">${details}${sectionSources(data.sources)}</aside></div>
+      <aside class="stack">${buildingSpawnScripts(spawnRooms)}${details}${sectionSources(data.sources)}</aside></div>
     <div id="building-cells">${section("Cells and contents", cells || '<p class="muted">Cell placements could not be resolved.</p>')}</div>
     ${unresolved.length ? section("Spawn rows with unresolved cells", unresolved.map(([name, objects]) =>
       "<h3>" + h(readable(name)) + "</h3>" + buildingContents(objects)).join("")) : ""}
@@ -699,8 +731,11 @@ export function dialogueLines(page, query, filter, sort) {
 
 export function entityPage(kind, entity, requestedView, metadata) {
   if (kind === "items" && requestedView === "loot") requestedView = "acquisition";
-  const view = tabsFor(kind, entity).some(([id]) => id === requestedView) ? requestedView : "overview";
-  const { card } = entity;
+  const { card, data } = entity;
+  const spawnRooms = kind === "locations" && card.category === "Building" ? buildingSpawnRooms(data) : [];
+  const spawnCount = spawnRooms.reduce((total, room) => total + room.contents.length, 0);
+  const tabs = tabsFor(kind, entity, spawnCount);
+  const view = tabs.some(([id]) => id === requestedView) ? requestedView : "overview";
   let body;
   if (view === "dialogue") {
     body = conversationGroup(entity);
@@ -725,7 +760,8 @@ export function entityPage(kind, entity, requestedView, metadata) {
       if (view === "model") body = modelPanel("In-game building model");
       else if (view === "map") body = locationOverview(entity, metadata);
       else if (view === "locations") body = placementSection(kind, entity);
-      else body = buildingOverview(entity, metadata);
+      else if (view === "spawns") body = buildingSpawnsView(spawnRooms);
+      else body = buildingOverview(entity, metadata, spawnRooms, spawnCount);
     }
     else body = view === "overview" ? locationOverview(entity, metadata) :
       section(({ npcs: "NPC placements", places: "Locations within " + card.name,
@@ -738,5 +774,5 @@ export function entityPage(kind, entity, requestedView, metadata) {
       section("Quest references", relatedRows(kind, card.id, entity, "quests", "No linked quests.")) +
       section("NPC references", relatedRows(kind, card.id, entity, "npcs", "No linked NPCs.")) + "</div>" : standaloneConversation(entity);
   }
-  return { html: detailHeader(kind, entity, view, metadata) + body, view };
+  return { html: detailHeader(kind, entity, view, metadata, tabs) + body, view };
 }
