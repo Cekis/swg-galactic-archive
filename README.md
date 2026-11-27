@@ -3,6 +3,9 @@
 The archive is a standalone local reference site for Star Wars Galaxies.
 It indexes the configured game data and links quests to NPCs, locations, dialogue,
 item templates, crafting recipes, resources, player ships, and sounds.
+The [public GitHub repository](https://github.com/Cekis/swg-galactic-archive)
+contains the application source and documentation. Configure your game inputs
+separately on the machine where you run the Archive.
 
 Open [the local archive](http://127.0.0.1:8768/) while the server is running.
 The home dashboard explains what you can find in each section, shows
@@ -379,8 +382,9 @@ python -B build_deployment.py --sources .local/sources.json --output .local/depl
 
 The builder checks every indexed model and NPC appearance choice, each
 map image and thumbnail, and every resource icon. It includes the playable
-sound samples. It ships the original asset bytes along with a SHA-256 manifest. Published source links open
-GitHub and local source excerpts are included for the catalog revision.
+sound samples and keeps the original asset bytes with a SHA-256 manifest.
+Published source links open GitHub, and the package includes local source
+excerpts for the catalog revision.
 
 Add `--with-github` to make a second ZIP that refers to native files whose
 bytes match the pinned GitHub checkouts. Selected files unique to local
