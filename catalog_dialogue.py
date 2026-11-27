@@ -4,6 +4,7 @@ from collections import defaultdict
 from pathlib import PurePosixPath
 import re
 
+from catalog_sounds import PLAY_CALLS, voiced_lines
 from catalog_sources import (
     SCRIPTS, Script, arguments, clean_table_name, display_id, literal, script_paths, source, string_ref,
 )
@@ -49,6 +50,7 @@ class DialogueIndex:
             self.quest_aliases[ident].add(ident)
         self.tables = {name: defaultdict(list) for name in strings.conversation_names()}
         self.dynamic = defaultdict(list)
+        self.audio = defaultdict(list)
         self.quest_tables = defaultdict(dict)
         self.script_tables = defaultdict(set)
 
@@ -94,6 +96,12 @@ class DialogueIndex:
         if not isinstance(default, str) and conversation_file:
             default = "conversation/" + path.stem
         default = clean_table_name(default) if isinstance(default, str) else None
+        if any(play in raw.lower() for play in PLAY_CALLS):
+            for table, key, sound, proof in voiced_lines(parsed, symbols, default):
+                cues = self.audio[table, key]
+                if not any(sound == existing for existing, _ in cues):
+                    cues.append((sound, proof))
+                self.init_table(table)
         seen = set()
         for match in STRING_CALL.finditer(parsed.text):
             args = arguments(parsed.text, match.end() - 1)

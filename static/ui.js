@@ -7,6 +7,7 @@ export const sections = {
   resources: { title: "Resources", single: "Resource", description: "Browse resource classes, quality ranges, harvesting worlds, and recipe uses." },
   ships: { title: "Ships", single: "Ship", description: "Browse player ship chassis, component slots, certifications, and deeds." },
   conversations: { title: "Dialogue", single: "Conversation", description: "Look up conversation codes, English game text, and source captions." },
+  sounds: { title: "Sounds", single: "Sound", description: "Play game audio and find the conversations, characters, ships, and components that use it." },
 };
 
 const entities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -176,8 +177,11 @@ export function linkRows(rows) {
     const context = [recommended, required, data?.chapter || data?.category, entry.detail?.reason,
       entry.detail?.slot, price, pools].filter(Boolean).join(" · ");
     const duplicate = data && (titles.get(data.name) > 1 || entry.detail?.shared_name);
+    const dialogue = entry.detail?.dialogue_lines || [];
+    const lines = entry.kind === "conversations" && dialogue.length ? dialogue.map(line =>
+      `<p><a class="dialog-code" href="${href("conversations", entry.id)}?line=${encodeURIComponent(line.code)}">${escapeHTML(line.code)}</a></p>`).join("") : "";
     return `<div class="rich-row">${data ? link(entry.kind, entry.id, data.name, "entity-name") : code(entry.id)}
-      ${context ? `<p>${escapeHTML(context)}</p>` : ""}${duplicate ? code(entry.id) : ""}</div>`;
+      ${context ? `<p>${escapeHTML(context)}</p>` : ""}${duplicate ? code(entry.id) : ""}${lines}</div>`;
   }).join("");
 }
 

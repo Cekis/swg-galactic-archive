@@ -15,6 +15,7 @@ from archive_config import PROJECT, SourceRepository, add_source_options, select
 from catalog_client_assets import ClientAssetPath
 from catalog_db import Catalog, packed
 from catalog_provenance import HASH, SourceCatalog, TEXT_TYPES, UPSTREAM_INDEX, valid_source
+from catalog_sounds import AUDIO_TYPES, SoundLibrary
 from deployment_assets import BLOCK, MANIFEST, file_hash
 from deployment_trace import asset_destinations, audit_in_parallel
 from recover_item_models import UpstreamAssets, write_report
@@ -51,6 +52,12 @@ def trace(catalog, profile, checkpoint=None):
         return identity, assets, previous["audit"]
 
     audit, files = audit_in_parallel(catalog.path, client, tools, game_data, overlay)
+    sounds = SoundLibrary(client)
+    with catalog.connect() as db:
+        for ident, in db.execute("SELECT id FROM entity WHERE kind='sounds' AND status='available'"):
+            if PurePosixPath(ident).suffix in AUDIO_TYPES:
+                if asset := sounds.path(ident):
+                    files.add((ident, asset))
     return identity, asset_destinations(files, client, tools, game_data, overlay), audit
 
 
@@ -162,7 +169,7 @@ or export a ZIP of JSON Lines files.
 The installer fetches only the missing files at their pinned GitHub revisions
 and checks their hashes. If you already have the repository ZIPs, reuse them
 with `python deployment_assets.py --snapshot-dir PATH`. After installation
-the archive renders maps and models from local files.
+the archive renders maps and models and plays audio from local files.
 """
     else:
         intro += "\nAll native preview assets are included. The site can render them offline.\n"

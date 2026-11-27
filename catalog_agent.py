@@ -26,6 +26,7 @@ LOOT_BASIS = ("Chance of at least one copy per eligible defeat at the NPC's auth
               "under standard server settings. Rates that depend on additional scripted conditions "
               "are recorded separately.")
 ENTITY_CONTENTS = {
+    "sounds": "Native sound templates and audio samples with authored uses and playback paths.",
     "quests": "Quest givers, prerequisites, objectives, rewards, quest chains, and dialogue references.",
     "npcs": "Creature and character profiles, base levels, equipment, spawn sources, and model references.",
     "locations": "Worlds, regions, towns, buildings, interior cells, map bounds, and location descriptions.",
@@ -77,6 +78,7 @@ def agent_manifest(metadata):
             "placements": "/api/placements?type={kind}&id={id}&scene={scene}&page={page}",
             "placement": "/api/placement?id={id}",
             "dialogue": "/api/dialogue?table={id}&page={page}&size={size}",
+            "audio_sample": "/api/audio?id={id}",
             "item_drop_ranking": LOOT_ROUTE + "?q={name}",
             "exact_item_drop_ranking": LOOT_ROUTE + "?item={id}",
             "item_drop_evidence": "/api/item-loot-npcs?type=items&id={id}&sort=chance-desc&page={page}",
@@ -102,7 +104,7 @@ def agent_guide(metadata, *, files=None):
     title = metadata.get("title", "Star Wars Galaxies Galactic Archive")
     introduction = f"""# {title}
 
-> The configured Star Wars Galaxies catalog covers quests, characters, locations, items, schematics, resources, ships, and dialogue.
+> The configured Star Wars Galaxies catalog covers quests, characters, locations, items, schematics, resources, ships, dialogue, and sounds.
 
 Game source revision `{metadata["revision"]}`.
 
@@ -110,7 +112,7 @@ Use each record's stable ID and source evidence in answers. Different records ca
 """
     if files is not None:
         return introduction + """
-Start with `manifest.json` for the file list and `names.jsonl` for names and stable IDs. The full entry is in the matching collection under `entities/`. Follow relationships in `link.jsonl` using `(kind, id)` and `(target_kind, target_id)`. Use `placement.jsonl` for object positions and join `npc_spawn_placement.jsonl` to it by placement ID for NPC positions. Dialogue entries contain their original string codes, English lines, and script captions. The map tables identify the scene, layer, and geometry of each feature.
+Start with `manifest.json` for the file list and `names.jsonl` for names and stable IDs. The full entry is in the matching collection under `entities/`. Follow relationships in `link.jsonl` using `(kind, id)` and `(target_kind, target_id)`. Use `placement.jsonl` for object positions and join `npc_spawn_placement.jsonl` to it by placement ID for NPC positions. Dialogue entries contain their original string codes, English lines, script captions, and linked audio sample IDs. The map tables identify the scene, layer, and geometry of each feature.
 
 With the generated SQLite catalog, the local `catalog_agent.py` command can search names, open records, page through links and placements, and filter dialogue. The `loot` subcommand ranks NPCs by item ID. To calculate a standard NPC drop rate from these files, filter `loot_pool` by item ID, join to `npc_drop_profile` by pool, and use each NPC's base level from `entities/npcs.jsonl`. For each NPC and pool, sum the per-roll fractions whose level gate is satisfied and cap the sum at one. The probability of at least one drop is `1 - (1 - gate * probability) ** rolls` for that pool. Combine pools with one minus the product of their miss probabilities. Report script channels and non-NPC loot sources with their own conditions.
 
@@ -122,7 +124,7 @@ With the generated SQLite catalog, the local `catalog_agent.py` command can sear
     return introduction + f"""
 Find an ID by name with `/api/search?q=...`, or browse and filter a collection with `/api/list`. Open the ID in `/api/entity` for its authored detail. The entity's `related` keys name the roles you can page through using `/api/related`. Use those links to trace prerequisites and rewards, recipes and ingredients, location hierarchies, or NPCs and their quests.
 
-Use `/api/placements` for NPC, item, or building positions, with an optional scene filter. Use `/api/dialogue` for the text and captions behind a conversation ID. Map routes provide extents and marker layers, and the asset routes provide map images, resource icons, and model previews.
+Use `/api/placements` for NPC, item, or building positions, with an optional scene filter. Use `/api/dialogue` for the text, captions, and recorded cues behind a conversation ID. Use `/api/audio` with a playable sample ID. Map routes provide extents and marker layers, and the asset routes provide map images, resource icons, and model previews.
 
 {LOOT_BASIS} Pass an item name as `q` or a stable item ID as `item` to `{LOOT_ROUTE}`. `chance` is a fraction and `chance_percent` is a percentage. `highest` compares items in `selection`. Cite the variant ID when the selection is `related_variants`. `tied_npcs` counts all NPCs tied at the highest rate, even when `size` limits the returned rows. Refine the name or pass an ID if the result says `refine_query`.
 
@@ -137,6 +139,7 @@ Use `/api/placements` for NPC, item, or building positions, with an optional sce
 - [Resources](/api/list?type=resources)
 - [Ships](/api/list?type=ships)
 - [Dialogue](/api/list?type=conversations)
+- [Sounds](/api/list?type=sounds)
 - [Catalog metadata](/api/meta)
 """
 

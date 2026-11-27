@@ -15,8 +15,8 @@ from catalog_placements import PLACEMENT_SCHEMA, build_placements
 from catalog_quest_locations import publish_location_quests
 
 
-KINDS = ("quests", "npcs", "locations", "items", "schematics", "resources", "ships", "conversations")
-SCHEMA = 10
+KINDS = ("quests", "npcs", "locations", "items", "schematics", "resources", "ships", "conversations", "sounds")
+SCHEMA = 11
 SEARCH_INDEX = """CREATE INDEX IF NOT EXISTS entity_search ON entity (kind, search, name COLLATE NOCASE, id)"""
 BROWSE_INDEX = """CREATE INDEX IF NOT EXISTS entity_browse
     ON entity (kind, name COLLATE NOCASE, id, category, status, level, search, card)"""
@@ -511,7 +511,8 @@ class Catalog:
         lines = data["lines"]
         if query:
             term = query.casefold()
-            lines = [line for line in lines if term in (
+            exact = [line for line in lines if line["code"].casefold() == term] if term.startswith("@") else []
+            lines = exact or [line for line in lines if term in (
                 line["code"] + " " + (line["text"] or "") + " " + " ".join(
                     use.get("caption") or "" for use in line["usages"])
             ).casefold()]

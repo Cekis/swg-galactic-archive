@@ -19,6 +19,7 @@ from catalog_model_previews import render_model_profile
 from catalog_models import ModelLibrary
 from catalog_provenance import SourceCatalog, valid_source
 from catalog_client_assets import ClientAssetPath
+from catalog_sounds import SoundLibrary
 from catalog_sources import GAME_MODEL_PATHS
 
 
@@ -75,6 +76,7 @@ class ArchiveServer(ThreadingHTTPServer):
                 chart["cities"] = catalog.with_map_details(scene, chart["cities"])
         clientdata, client_tools = profile.clientdata, profile.root("client-tools")
         self.maps = MapLibrary(clientdata)
+        self.audio = SoundLibrary(clientdata)
         self.models = ModelLibrary(clientdata, client_tools,
                                    (profile.root("game-data") / path for path in GAME_MODEL_PATHS),
                                    asset_overlay=profile.overlay)
@@ -93,7 +95,7 @@ class ArchiveServer(ThreadingHTTPServer):
 class ArchiveHandler(BaseHTTPRequestHandler):
     server_version = "StarWarsGalaxiesArchive"
 
-    def respond(self, body, kind, status=200, *, cache="no-cache", location=None):
+    def respond(self, body, kind, status=200, *, cache="no-cache", location=None, headers=()):
         self.send_response(status)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
@@ -102,6 +104,8 @@ class ArchiveHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        for name, value in headers:
+            self.send_header(name, value)
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; "
                          "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
                          "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
@@ -117,6 +121,29 @@ class ArchiveHandler(BaseHTTPRequestHandler):
 
     def missing(self, subject):
         self.json({"error": f"{subject} not found."}, HTTPStatus.NOT_FOUND)
+
+    def sound(self, ident):
+        clip = self.server.audio.clip(ident)
+        if clip is None:
+            self.missing("Audio sample")
+            return
+        mime, body = clip
+        headers = [("Accept-Ranges", "bytes")]
+        size = len(body)
+        if match := re.fullmatch(r"bytes=(\d{0,18})-(\d{0,18})", self.headers.get("Range", "")):
+            first, last = match.groups()
+            if first or last:
+                start = int(first) if first else max(0, size - int(last))
+                end = min(size - 1, int(last)) if first and last else size - 1
+                if start > end:
+                    headers.append(("Content-Range", f"bytes */{size}"))
+                    self.respond(b"", mime, HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, headers=headers)
+                    return
+                headers.append(("Content-Range", f"bytes {start}-{end}/{size}"))
+                self.respond(body[start:end + 1], mime, HTTPStatus.PARTIAL_CONTENT,
+                             cache="private, max-age=3600", headers=headers)
+                return
+        self.respond(body, mime, cache="private, max-age=3600", headers=headers)
 
     def do_HEAD(self):
         self.do_GET()
@@ -220,6 +247,9 @@ class ArchiveHandler(BaseHTTPRequestHandler):
                 raise ValueError("Supply one NPC, ship, item, or building ID.")
             model = self.server.render_model(*supplied[0], field("variant"))
             self.json(model) if model is not None else self.missing("Model entry")
+            return
+        if path == "/api/audio":
+            self.sound(field("id", maximum=512))
             return
         if path == "/api/resource-image":
             icon = self.server.meta["resource_icons"].get(field("class"))

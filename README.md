@@ -2,7 +2,7 @@
 
 The archive is a standalone local reference site for Star Wars Galaxies.
 It indexes the configured game data and links quests to NPCs, locations, dialogue,
-item templates, crafting recipes, resources, and player ships.
+item templates, crafting recipes, resources, player ships, and sounds.
 
 Open [the local archive](http://127.0.0.1:8768/) while the server is running.
 The home dashboard explains what you can find in each section, shows
@@ -26,7 +26,7 @@ paths can use forward slashes, as in `F:/SWGProjects/my-server`.
 | Input | What it supplies |
 | --- | --- |
 | `dsrc` | Required Git checkout containing `sku.0/sys.server/compiled/game`. The indexer reads server and shared datatables, scripts, and object templates at the selected commit. |
-| `clientdata` | A valid SWG client installation or an extracted asset directory. This supplies maps, models, icons, strings, and compiled tables. |
+| `clientdata` | A valid SWG client installation or an extracted asset directory. This supplies maps, models, icons, strings, sounds, and compiled tables. |
 | `client-tools` | Optional supplemental client assets. English STF files here take precedence over `clientdata/string/en`. One of those inputs must contain the English strings. |
 | `src` | Optional native source checkout for code references. |
 | `game-data` | Optional staged, compiled `data` directory for additional model files. |
@@ -198,6 +198,13 @@ Select it again to reverse the order.
   which contains the English STF files for this installation. Unresolved
   runtime expressions remain visible. A quest reference identifies the
   associated table. The dialogue branches determine which lines can play.
+  Lines with recorded audio in their conversation script have a player and
+  a link to the sound detail page.
+- **Sounds** lists the client’s sound templates, voice recordings, effects,
+  and music. Each detail page links to its native samples and the quests,
+  conversations, NPCs, locations, ships, or items that reference it. Engine
+  component links come from the ship’s authored attachment data. The page
+  shows whether a referenced sample is present in the selected client.
 - **NPCs** include authored creature profiles, space mobiles, placed NPCs,
   and quest contacts. Their Quests tab shows series starters by default,
   with continuations listed as other offers. A start is based on the
@@ -364,15 +371,15 @@ The recovery uses the supplied asset checkouts as read-only inputs.
 
 After regenerating the catalog, build a ZIP using the same source configuration.
 Choose a fresh output directory for each build. The builder packages the current
-SQLite index and the native files used by the viewer.
+SQLite index and the native files used by the viewer and audio player.
 
 ```powershell
 python -B build_deployment.py --sources .local/sources.json --output .local/deployments/refresh-1
 ```
 
 The builder checks every indexed model and NPC appearance choice, each
-map image and thumbnail, and every resource icon. It ships the original
-asset bytes along with a SHA-256 manifest. Published source links open
+map image and thumbnail, and every resource icon. It includes the playable
+sound samples. It ships the original asset bytes along with a SHA-256 manifest. Published source links open
 GitHub and local source excerpts are included for the catalog revision.
 
 Add `--with-github` to make a second ZIP that refers to native files whose

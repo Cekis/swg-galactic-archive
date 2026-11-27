@@ -27,6 +27,7 @@ from catalog_lore import add_location_descriptions, load_client_landmarks
 from catalog_map import LAYERS
 from catalog_models import ModelLibrary
 from catalog_npc_models import NpcModels
+from catalog_sounds import SoundIndex
 from catalog_spawns import SpawnIndex
 from catalog_sources import (
     GAME_MODEL_PATHS, PLANETS, ROOT, SERVER, ClientStrings, GameFiles, display_id,
@@ -497,9 +498,23 @@ def write_catalog(writer, profile, issues):
                       search=aliases, card=card)
     publish_location_hierarchy(writer, places)
 
+    print("Indexing sound samples, recorded dialogue, and engine attachments", flush=True)
+    audio_models = ModelLibrary(clientdata, client_tools,
+                                (profile.root("game-data") / path for path in GAME_MODEL_PATHS),
+                                asset_overlay=profile.overlay)
+    sounds = SoundIndex(clientdata, audio_models)
+    sounds.inventory()
+    sounds.authored(writer, files)
+    sounds.engines(writer, files)
+    sounds.dialogue(writer, dialogue)
+    sounds.publish(writer, issues)
+
     dialogue_stats = Counter()
     for table in sorted(dialogue.tables):
         entry = dialogue.conversation(table)
+        for line in entry["lines"]:
+            if audio := sounds.line_audio.get((table, line["key"])):
+                line["sounds"] = audio
         dialogue_stats.update(entry["counts"])
         writer.entity("conversations", table, entry["name"], entry, category=table.split("/")[0],
                       card={"line_count": len(entry["lines"]), "different": entry["counts"]["different"],

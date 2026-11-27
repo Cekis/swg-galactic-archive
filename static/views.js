@@ -24,6 +24,7 @@ const dashboardSections = {
   resources: "Compare material types, quality ranges, harvesting worlds, and recipes.",
   ships: "Inspect player chassis, components, pilot certifications, and deeds.",
   conversations: "Read the game's English dialogue alongside its original string codes.",
+  sounds: "Listen to game audio and look up where it is used.",
 };
 
 export function homePage(metadata, query, matches) {
@@ -94,6 +95,7 @@ function columns(kind) {
     resources: [["Resource", "name"], ["Category", "category"], ["Parent class", "parent"], ["Worlds", "worlds"]],
     ships: [["Ship", "name"], ["Role", "category"], ["Tier", "level"], ["Component slots", "slots"], ["Template", "template"]],
     conversations: [["Conversation", "name"], ["Lines", "lines"], ["Different", "different"], ["Missing", "missing"]],
+    sounds: [["Sound", "name"], ["Type", "category"], ["Format"], ["Playable samples"]],
   })[kind];
 }
 
@@ -120,6 +122,7 @@ function rowCells(kind, record, metadata) {
   if (kind === "resources") return [h(record.category), h(record.parent || "—"),
     record.worlds ? integer(record.worlds) : "—"];
   if (kind === "ships") return [h(record.category), tier, integer(record.slots), code(record.template)];
+  if (kind === "sounds") return [h(record.category), h(record.format), integer(record.playable)];
   if (kind === "locations") return [scene, h(record.category), record.has_map ? tag("Map", "good") : "—"];
   return [integer(record.line_count), record.different ? tag(integer(record.different), "warn") : "—",
     record.missing ? tag(integer(record.missing), "bad") : "—"];
@@ -263,6 +266,7 @@ function tabsFor(kind, entity, spawnCount) {
     ["acquisition", "Deeds and recipes"], ["model", "Model"]];
   if (kind === "resources") return [["overview", "Overview"], ["distribution", "Worlds", entity.card.worlds],
     ["schematics", "Recipes", count("schematics")], ["children", "Subclasses", count("children")]];
+  if (kind === "sounds") return [["overview", "Overview"]];
   return [["overview", "Lines", entity.card.line_count], ["references", "References"]];
 }
 
@@ -721,6 +725,31 @@ function standaloneConversation(entity) {
     + conversationContent)}${dynamic}</div>`;
 }
 
+function audioPlayer(id, label) {
+  return `<audio controls preload="none" aria-label="${h(label)}" src="/api/audio?id=${encodeURIComponent(id)}"></audio>`;
+}
+
+function soundOverview(entity) {
+  const { card, data, related } = entity;
+  const rows = data.samples.length ? data.samples : data.playable;
+  const playable = new Set(data.playable);
+  const samples = rows.map(id => {
+    const name = readable(id.split("/").pop());
+    return `<div class="rich-row sound-preview">
+      ${id === card.id ? "" : link("sounds", id, name)}
+      ${playable.has(id) ? audioPlayer(id, name) : '<p class="muted">Sample unavailable</p>'}
+    </div>`;
+  }).join("");
+  const uses = [["templates", "Sound templates"], ["conversations", "Dialogue"], ["npcs", "NPCs"],
+    ["quests", "Quests"], ["ships", "Ships"], ["items", "Items and components"], ["locations", "Locations"]];
+  return `<div class="stack">
+    ${section("Playback", samples || '<p class="muted">No playable sample is available in the selected client data.</p>')}
+    ${uses.filter(([role]) => related[role]?.count).map(([role, name]) =>
+      section(name, relatedRows("sounds", card.id, entity, role, ""))).join("")}
+    ${sectionSources(data.sources)}
+  </div>`;
+}
+
 export function dialogueLines(page, query, filter, sort) {
   const rows = page.rows.map(line => {
     const captions = [...new Set(line.usages.map(use => use.caption).filter(Boolean))];
@@ -728,8 +757,11 @@ export function dialogueLines(page, query, filter, sort) {
       <p>${h([use.speaker, readable(use.source_role), alignment[use.alignment]?.[0]].filter(Boolean).join(" · "))}</p>
       ${use.caption ? `<span class="long-text">${h(use.caption)}</span>` : ""}${sourceText(use.source)}</div>`).join("");
     const evidence = usages ? `<details><summary>${line.usages.length} reference${line.usages.length === 1 ? "" : "s"}</summary>${usages}</details>` : "";
+    const audio = (line.sounds || []).map(cue => `<div class="sound-preview">
+      ${cue.clip ? audioPlayer(cue.clip, "Recorded audio for " + line.key) : ""}
+      ${link("sounds", cue.id, "Sound details")}${sourceText(cue.source)}</div>`).join("");
     return `<tr><td>${copyMarkup(line.code, line.code, "Copy string code", "copy-code dialog-code")}${line.speakers.length ? `<small class="entity-sub">${h(line.speakers.map(readable).join(", "))}</small>` : ""}</td>
-    <td>${line.text != null ? `<p class="long-text">${h(line.text)}</p>` : '<span class="muted">Unresolved</span>'}</td>
+    <td>${line.text != null ? `<p class="long-text">${h(line.text)}</p>` : '<span class="muted">Unresolved</span>'}${audio}</td>
     <td>${captions.map(caption => `<p class="long-text">${h(caption)}</p>`).join("") || "—"}</td>
     <td>${tag(...(alignment[line.status] || [readable(line.status)]))}${evidence}</td></tr>`;
   }).join("");
@@ -752,9 +784,14 @@ export function entityPage(kind, entity, requestedView, metadata) {
   const spawnRooms = kind === "locations" && card.category === "Building" ? buildingSpawnRooms(data) : [];
   const spawnCount = spawnRooms.reduce((total, room) => total + room.contents.length, 0);
   const tabs = tabsFor(kind, entity, spawnCount);
+  if (entity.related.sounds?.count) tabs.push(["sounds", "Sounds", entity.related.sounds.count]);
   const view = tabs.some(([id]) => id === requestedView) ? requestedView : "overview";
   let body;
-  if (view === "dialogue") {
+  if (view === "sounds") {
+    body = section("Associated sounds", relatedRows(kind, card.id, entity, "sounds", "No linked sounds."));
+  } else if (kind === "sounds") {
+    body = soundOverview(entity);
+  } else if (view === "dialogue") {
     body = conversationGroup(entity);
   } else if (kind === "quests") {
     body = view === "objectives" ? questObjectives(entity, metadata) : view === "chain" ? questChain(entity) : questOverview(entity, metadata);
