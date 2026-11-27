@@ -11,6 +11,17 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Port -ne 0) {
+    $portProbe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+    $portProbe.ExclusiveAddressUse = $true
+    try {
+        $portProbe.Start()
+    } catch [System.Net.Sockets.SocketException] {
+        throw "The Archive cannot use port $Port. Close the server already listening there or run ./start.ps1 with a free -Port. $($_.Exception.Message)"
+    } finally {
+        $portProbe.Stop()
+    }
+}
 if ($GameRoot) { $env:SWG_GAME_ROOT = (Resolve-Path -LiteralPath $GameRoot).Path }
 $assetArgs = @()
 if ($SourcesConfig) { $assetArgs += @('--sources', (Resolve-Path -LiteralPath $SourcesConfig).Path) }

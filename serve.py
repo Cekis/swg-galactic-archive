@@ -7,6 +7,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import mimetypes
 import re
+import socket
 from urllib.parse import parse_qs, urlsplit
 
 from archive_config import PROJECT, add_source_options, select_profile
@@ -49,6 +50,12 @@ def normalize_int(value, default, lower, upper):
 
 class ArchiveServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.allow_reuse_address = False
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def __init__(self, address, catalog, profile):
         super().__init__(address, ArchiveHandler)
@@ -310,7 +317,11 @@ def main():
             parser.error("Rebuild the catalog with build_catalog.py for the current source configuration.")
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    with ArchiveServer(("127.0.0.1", args.port), catalog, profile) as server:
+    try:
+        server = ArchiveServer(("127.0.0.1", args.port), catalog, profile)
+    except OSError as error:
+        parser.exit(1, f"Cannot start the Archive on port {args.port}. {error}\n")
+    with server:
         print(f"Local: http://127.0.0.1:{server.server_port}/", flush=True)
         try:
             server.serve_forever()
