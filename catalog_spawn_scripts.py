@@ -15,6 +15,7 @@ from catalog_sources import SCRIPTS, arguments, source
 # space_create.scriptlib, and the native bindings in base_class.java.
 CREATORS = {
     "create.object": (0, 1, "creature"),
+    "create.staticObject": (0, 1, "creature"),
     "create.createNpc": (0, 2, "creature"),
     "createObject": (0, 1, "creature"),
     "createObjectAt": (0, 1, "creature"),
@@ -34,6 +35,17 @@ TABLE = re.compile(r'"(datatables/[\w/-]+\.iff)"')
 STRING = re.compile(r'"(?:\\.|[^"\\])*"')
 NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?[fd]?", re.I)
 POSITION = re.compile(r"new\s+location\s*\(")
+LOCATION_WRITE = re.compile(r"\b(\w+)\s*\.\s*([xyz]|area|cell)\s*(?:([+*-]?=)(?!=)|\+\+|--)")
+ROOM_TABLE_READ = re.compile(
+    r"(?<![\w$.])(?:(?:utils\s*\.\s*)?dataTableGet(?:String|Float|Int)"
+    r"|(spawning\s*\.\s*spawnObjectsInDungeonFromTable))\s*\("
+)
+ROOM_COLUMNS = {"room", "cell", "cellname", "loc_x", "locx", "x_offset"}
+OBJECT_DISPATCH = re.compile(
+    r'\b(\w+)\s*\.\s*(?:contains|endsWith)\s*\(\s*"\.iff"\s*\)\s*'
+    r'(?:\?|(?=\)\s*\{))'
+)
+OBJECT_DISPATCH_ELSE = re.compile(r'\)\s*(?::|;\s*\}\s*else\s*\{\s*(?:\w+\s*=\s*)?)\s*$')
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,11 +89,13 @@ def _is_receiver(value):
 
 
 class SpawnScripts(ScriptValues):
-    def __init__(self, files, creatures, templates, scenes):
+    def __init__(self, files, creatures, templates, scenes, interior_scripts=()):
         super().__init__(files)
         self.creatures, self.templates, self.scenes = creatures, templates, scenes
+        self.interior_scripts = set(interior_scripts)
         self.by_script = defaultdict(list)
         self.by_table = defaultdict(dict)
+        self.room_tables = defaultdict(dict)
         self.unresolved = []
         self.stats = Counter()
         self._visited = set()
@@ -116,22 +130,32 @@ class SpawnScripts(ScriptValues):
         values = self._values(expression, frame)
         return values[0][0] if len(values) == 1 and not values[0][2] else None
 
-    def _number(self, expression, frame):
+    def _number(self, expression, frame, depth=0):
+        if depth == 8:
+            return None
         if NUMBER.fullmatch(expression):
             return _numeric(expression.rstrip("fFdD"))
         if VARIABLE.fullmatch(expression):
             owner, choices, _, _ = frame.bindings.binding(expression, frame.at)
             if len(choices) == 1:
-                _, value = choices[0]
-                if NUMBER.fullmatch(value):
-                    return _numeric(value.rstrip("fFdD"))
+                at, value = choices[0]
+                return self._number(value, Frame(owner, at, frame.args, frame.caller), depth + 1)
+            if frame.caller and expression in frame.args:
+                return self._number(frame.args[expression], frame.caller, depth + 1)
         return _numeric(self._value(expression, frame))
+
+    def _receiver(self, expression, frame, depth=0):
+        if depth == 8:
+            return False
+        if frame.caller and expression in frame.args:
+            return self._receiver(frame.args[expression], frame.caller, depth + 1)
+        return _is_receiver(expression)
 
     def _room(self, expression, frame, depth=0):
         if depth == 8:
             return None
         _, method, args = function(expression)
-        if method == "getCellId" and len(args) == 2 and _is_receiver(args[0]):
+        if method == "getCellId" and len(args) == 2 and self._receiver(args[0], frame):
             name = self._value(args[1], frame)
             return name if isinstance(name, str) else None
         if VARIABLE.fullmatch(expression):
@@ -142,6 +166,18 @@ class SpawnScripts(ScriptValues):
             if frame.caller and expression in frame.args:
                 return self._room(frame.args[expression], frame.caller, depth + 1)
         return None
+
+    def _assigned_position(self, updates, frame):
+        if len(updates) != 4 or {field for _, field, _ in updates} != {"x", "y", "z", "cell"}:
+            return Position()
+        resolved = {}
+        for at, field, value in updates:
+            if value is None or not frame.bindings.visible(frame.bindings.block(at), frame.at):
+                return Position()
+            context = Frame(frame.bindings, at, frame.args, frame.caller)
+            resolved[field] = self._room(value, context) if field == "cell" else self._number(value, context)
+        xyz = tuple(resolved[axis] for axis in "xyz")
+        return Position(xyz=None if None in xyz else xyz, room=resolved["cell"], frame="cell")
 
     def _position(self, expression, frame, depth=0):
         if depth == 8:
@@ -161,13 +197,16 @@ class SpawnScripts(ScriptValues):
             owner, choices, _, _ = frame.bindings.binding(expression, frame.at)
             if len(choices) == 1:
                 offset, value = choices[0]
-                if frame.uses and any(offset < member < frame.at for member in frame.uses.get(expression, ())):
-                    return Position()
+                updates = [update for update in (frame.uses or {}).get(expression, ())
+                           if offset < update[0] < frame.at]
+                if updates:
+                    return self._assigned_position(updates, frame)
                 return self._position(value, Frame(owner, offset, frame.args, frame.caller, frame.uses), depth + 1)
             if frame.caller and expression in frame.args:
                 return self._position(frame.args[expression], frame.caller, depth + 1)
         _, method, values = function(expression)
-        if method in {"getLocation", "getWorldLocation", "getTransform_o2p"} and len(values) == 1 and _is_receiver(values[0]):
+        if (method in {"getLocation", "getWorldLocation", "getTransform_o2p"} and len(values) == 1
+                and self._receiver(values[0], frame)):
             return Position(frame="anchor")
         return Position()
 
@@ -197,15 +236,15 @@ class SpawnScripts(ScriptValues):
         for ident, path in sorted(self.paths.items()):
             self.stats["scripts"] += 1
             raw = self.files.text(path)
-            if not CREATE.search(raw) and not TABLE.search(raw):
+            reads_rooms = ident in self.interior_scripts and ROOM_TABLE_READ.search(raw)
+            if not reads_rooms and not CREATE.search(raw) and not TABLE.search(raw):
                 continue
             clean, code = source_views(raw)
             development = bool(DEV_DIRS.intersection(path.relative_to(SCRIPTS).parts)) or ident in DEV_SCRIPTS
             for match in TABLE.finditer(clean):
                 self.by_table[match[1]].setdefault(ident, (source(path, clean.count("\n", 0, match.start()) + 1), development))
-            if not CREATE.search(code):
-                continue
-            self._scan_script(ident, path, clean, code, development)
+            if CREATE.search(code) or reads_rooms:
+                self._scan_script(ident, path, clean, code, development)
         self.stats["resolved_calls"] = len({(call.path["path"], call.path["line"]) for calls in self.by_script.values() for call in calls})
         self.stats["unresolved_calls"] = len(self.unresolved)
         self._visited.clear()
@@ -239,13 +278,16 @@ class SpawnScripts(ScriptValues):
             body = code[start:end]
             direct = list(CREATE.finditer(body))
             local = [call for call in CALL.finditer(body) if call[1] in names]
-            if not direct and not local:
+            room_reads = list(ROOM_TABLE_READ.finditer(body)) if ident in self.interior_scripts and not development else []
+            if not direct and not local and not room_reads:
                 continue
             bindings = Bindings(clean[method.start():end], code[method.start():end], fields)
             writes = defaultdict(list)
-            for match in re.finditer(r"\b(\w+)\s*\.\s*(?:[xyz]|area|cell)\s*(?:[+*-]?=(?!=)|\+\+|--)", body):
-                writes[match[1]].append(start - method.start() + match.start())
-            parsed[index] = (direct, bindings, writes)
+            for match in LOCATION_WRITE.finditer(body):
+                end = body.find(";", match.end())
+                value = clean[start + match.end():start + end].strip() if match[3] == "=" and end >= 0 else None
+                writes[match[1]].append((start - method.start() + match.start(), match[2], value))
+            parsed[index] = (direct, bindings, writes, room_reads)
             for call in local:
                 args = arguments(clean, start + call.end() - 1)
                 at = start - method.start() + call.start()
@@ -253,7 +295,7 @@ class SpawnScripts(ScriptValues):
 
         def contexts(index, at, visited=()):
             method, _ = methods[index]
-            _, bindings, writes = parsed[index]
+            _, bindings, writes, _ = parsed[index]
             yield Frame(bindings, at, {}, uses=writes), None
             if index in visited or len(visited) >= 3:
                 return
@@ -266,10 +308,36 @@ class SpawnScripts(ScriptValues):
 
         # A legacy script's triggers and message handlers are runtime entry
         # points. A helper with no caller is retained as a definition.
-        for index, (direct, _, _) in parsed.items():
+        for index, (direct, _, _, room_reads) in parsed.items():
             method, _ = methods[index]
             invoked = (path.suffix != ".script" or method[0].lstrip().startswith(("trigger ", "messageHandler "))
                        or bool(callers[method[1], len(_parameters(method[0]))]))
+            if invoked:
+                for read in room_reads:
+                    absolute = method.end() + read.start()
+                    args = arguments(clean, method.end() + read.end() - 1)
+                    if len(args) < 3:
+                        continue
+                    proof = source(path, clean.count("\n", 0, absolute) + 1)
+                    for frame, _ in contexts(index, absolute - method.start()):
+                        if read[1]:
+                            if not self._receiver(args[0], frame):
+                                continue
+                            table_arg = args[2]
+                        else:
+                            column = self._value(args[2], frame)
+                            if not isinstance(column, str) or column.casefold() not in ROOM_COLUMNS:
+                                continue
+                            table_arg = args[0]
+                        for ref, _, _ in self._values(table_arg, frame):
+                            if isinstance(ref, str) and ref.startswith(("datatables/", "@objvar/")):
+                                self.room_tables[ident].setdefault(ref, proof)
+            dispatch_arg = None
+            if len(direct) == 2 and direct[0].groups() == (None, "createObject") and direct[1].groups() == ("create", "object"):
+                before = clean[method.end():method.end() + direct[0].start()]
+                between = clean[method.end() + direct[0].end():method.end() + direct[1].start()]
+                if (dispatch := OBJECT_DISPATCH.search(before)) and OBJECT_DISPATCH_ELSE.search(between):
+                    dispatch_arg = dispatch[1]
             for call in direct:
                 module, name = call.groups()
                 owner = module or (ident[8:] if ident.startswith("library.") else "")
@@ -286,16 +354,24 @@ class SpawnScripts(ScriptValues):
                 for frame, via in contexts(index, absolute - method.start()):
                     targets = self._values(args[target_index], frame)
                     had_values |= bool(targets)
-                    if not any(self._target(mode, value) for value, _, _ in targets):
+                    keep_objects = ident in self.interior_scripts and mode in {"creature", "cell"}
+                    candidates = [(target, table, possible, self._target(mode, target))
+                                  for target, table, possible in targets if isinstance(target, str)]
+                    if not any(accepted or keep_objects and OBJECT_ASSET.fullmatch(target)
+                               for target, _, _, accepted in candidates):
                         continue
                     position = self._position(args[location_index], frame)
                     if key == "createObjectAt" and _is_receiver(args[location_index]):
                         position = Position(frame="anchor")
-                    if mode == "cell" and len(args) > 2 and _is_receiver(args[1]):
+                    if mode == "cell" and len(args) > 2 and self._receiver(args[1], frame):
                         room = self._value(args[2], frame)
-                        position = Position(room=room if isinstance(room, str) else None, frame="cell")
-                    for target, table, possible in targets:
-                        if self._target(mode, target):
+                        local = self._position(args[3], frame) if len(args) > 3 else Position()
+                        position = Position(xyz=local.xyz, room=room if isinstance(room, str) else None, frame="cell")
+                    for target, table, possible, accepted in candidates:
+                        if dispatch_arg == args[target_index] and target.endswith(".iff") != (key == "createObject"):
+                            continue
+                        if accepted or (keep_objects and (position.room or position.frame == "anchor") and
+                                        OBJECT_ASSET.fullmatch(target)):
                             self._record(ident, proof, method[1], key, mode, target, table, position, possible,
                                          development or not invoked, via)
                             resolved = True

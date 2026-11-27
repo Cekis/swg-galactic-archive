@@ -148,9 +148,10 @@ def floor_mesh(root):
 
 
 class BuildingAssets(ModelLibrary):
-    def __init__(self, clientdata, files):
-        super().__init__(clientdata)
-        self.files = files
+    def __init__(self, spatial):
+        super().__init__(spatial.clientdata)
+        self.spatial = spatial
+        self.files = spatial.files
 
     @lru_cache(maxsize=2048)
     def building(self, template):
@@ -159,8 +160,10 @@ class BuildingAssets(ModelLibrary):
         try:
             shared, fields = self._object_appearance(hint[1] if hint and normalize_ref(hint[1]) else template)
         except ASSET_ERRORS:
-            return {}
+            shared, fields = None, {}
         portal = fields.get("portalLayoutFilename")
+        if not portal and (resolved := self.spatial._portal_rooms(template)):
+            portal = resolved[0]
         appearance = fields.get("appearanceFilename")
         cells, checksum = [], None
         if portal:
@@ -258,7 +261,7 @@ def floor_footprint(rooms):
 
 class BuildingIndex:
     def __init__(self, spatial, items, npcs):
-        self.assets = BuildingAssets(spatial.clientdata, spatial.files) if spatial.clientdata else None
+        self.assets = BuildingAssets(spatial) if spatial.clientdata else None
         self.spatial, self.items, self.npcs = spatial, items, npcs
         self.points = defaultdict(dict)
         self.restrictions = {}
@@ -340,11 +343,12 @@ class BuildingIndex:
             if mob in self.npcs:
                 label, target = self.npcs[mob]["name"], ["npcs", mob]
             coordinates = point["coordinates"]
-            if coordinates is None and transform:
+            if coordinates is None and transform and point["local_coordinates"] is not None:
                 coordinates = _display_coordinates(_compose(transform, point["local_coordinates"], IDENTITY)[0])
             contents.append({"name": point.get("name") or label, "target": target, "template": ref,
                              "coordinates": coordinates, "local_coordinates": point["local_coordinates"],
-                             "source": point["source"], "origin": "building_spawn"})
+                             "source": point["source"], "origin": "building_spawn",
+                             "spawn_origin": point.get("spawn_origin"), "required_event": point.get("required_event")})
         return sorted(contents, key=lambda row: row["name"].casefold())
 
     def _rooms(self, building, authored, layout, children, spawns):
@@ -352,7 +356,8 @@ class BuildingIndex:
         declared = {room["index"]: room for room in layout if room["index"]}
         scripts = defaultdict(list)
         for point in spawns:
-            scripts[point["room"]].append(point)
+            scripts[point["room"].casefold()].append(point)
+        room_names = Counter(room["name"].casefold() for room in declared.values())
         rooms = []
         for index in sorted(placed.keys() | declared.keys()):
             room, record = declared.get(index, {}), placed.get(index, {})
@@ -364,12 +369,13 @@ class BuildingIndex:
                 vertices, faces = mesh
                 floor = {"points": project(vertices, transform), "faces": faces}
             parents = children.get(record.get("placement_key"), ())
-            inventory = self._contents(children, parents, scripts.pop(name, ()), transform)
+            matches = scripts.pop(name.casefold(), ()) if room_names[name.casefold()] == 1 else ()
+            inventory = self._contents(children, parents, matches, transform)
             rooms.append({"index": index, "name": name, "portals": room.get("portals"),
                           "floor": floor, "floor_asset": room.get("floor"), "appearance": room.get("appearance"),
                           "object_id": record.get("runtime_object_id") or record.get("object_id"),
                           "origin": _display_coordinates(transform[0]), "source": record.get("source"), "contents": inventory})
-        unresolved = {name: self._contents(children, (), rows_, None) for name, rows_ in scripts.items()}
+        unresolved = {rows_[0]["room"]: self._contents(children, (), rows_, None) for rows_ in scripts.values()}
         return rooms, unresolved
 
     def publish(self, writer):

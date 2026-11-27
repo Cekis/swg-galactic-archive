@@ -550,10 +550,39 @@ const placementOrigins = {
   client_buildout: "Client buildout", client_snapshot: "Client snapshot", building_spawn: "Script spawn",
 };
 
+function buildingPlacementSource(object) {
+  const placement = placementOrigins[object.origin] || readable(object.origin);
+  const origin = object.spawn_origin;
+  if (!origin) {
+    return (object.spawner ? `<strong>Dedicated spawner object</strong><small>${h(placement)}</small>` :
+      h(placement)) + sourceText(object.source);
+  }
+
+  const records = new Map();
+  function add(label, proof) {
+    if (proof?.path) {
+      const key = JSON.stringify([proof.path, proof.line]);
+      if (!records.has(key)) records.set(key, [label, proof]);
+    }
+  }
+  add("Datatable row", origin.table_source);
+  add("Spawn call", origin.caller_source);
+  add("Spawn script", origin.script_source);
+  for (const proof of origin.attachments) {
+    add(proof.kind === "buildout" ? "Buildout attachment" : origin.template ? "Spawner template" : "Building template", proof);
+  }
+  add("Placement source", object.source);
+
+  return `<strong>${h(origin.type)}</strong><small>${h(origin.script)}</small>${records.size ?
+    `<details class="spawn-sources"><summary>Source records</summary>
+      <ul class="spawn-source-list">${[...records.values()].map(([label, proof]) =>
+        `<li><span class="spawn-source-label">${h(label)}</span>${sourceText(proof)}</li>`).join("")}</ul></details>` : ""}`;
+}
+
 function buildingContents(contents, roomIndex = null) {
-  if (!contents.length) return '<p class="muted">No placed objects are recorded in this cell.</p>';
+  if (!contents.length) return '<p class="muted">No objects are recorded in this cell.</p>';
   return `<div class="table-wrap"><table class="data-table building-contents">
-    <thead><tr><th>Object</th><th>World position</th><th>Local position</th><th>Placement source</th></tr></thead>
+    <thead><tr><th>Object</th><th>World position</th><th>Local position</th><th>Spawn or placement source</th></tr></thead>
     <tbody>${contents.map((object, index) => {
       const name = object.target ? link(...object.target, object.name) : h(object.name);
       const local = object.local_coordinates;
@@ -564,9 +593,8 @@ function buildingContents(contents, roomIndex = null) {
         <td>${local ? copyMarkup(local.map((value, index) => "XYZ"[index] + " " + integer(value)).join(" · "),
           coordinateValue(local), "Copy local coordinates", "coordinate") : "—"}
           ${object.coordinate_frame === "parent" ? '<small>Relative to parent object</small>' : ""}</td>
-        <td>${h(placementOrigins[object.origin] || readable(object.origin))}
-          ${object.required_event ? `<small>Event ${h(readable(object.required_event))}</small>` : ""}
-          ${sourceText(object.source)}</td></tr>`;
+        <td>${buildingPlacementSource(object)}
+          ${object.required_event ? `<small>Event ${h(readable(object.required_event))}</small>` : ""}</td></tr>`;
     }).join("")}</tbody></table></div>`;
 }
 
@@ -592,7 +620,7 @@ function buildingOverview({ data, related }, metadata) {
     ["Location", `<a href="${href("locations", data.id)}?view=locations">View building location</a>`],
     ["Travel", travel && link("locations", travel, "View travel information")],
     ["World footprint", data.bounds && worldBounds(data.bounds)], ["Cells", integer(data.cells.length)],
-    ["Placed objects", integer(total)], ["Template", code(data.template)],
+    ["Objects in cells", integer(total)], ["Template", code(data.template)],
     ["Portal layout", data.layout_asset && code(data.layout_asset)],
     ["Event", h(readable(data.required_event))],
     ["Footprint source", data.geometry_source ? h(data.geometry_kind) + sourceText(data.geometry_source) : "Exterior outline unavailable"],

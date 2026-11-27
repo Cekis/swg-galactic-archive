@@ -250,6 +250,132 @@ class SourceProfileTests(unittest.TestCase):
         self.assertEqual(str(error.exception),
                          "Unable to read branches for AlternateOrg/offline. Git ls-remote failed (exit 128)")
 
+    def test_building_cells_link_master_scripts_tables_and_dedicated_spawners(self):
+        with TemporaryDirectory() as work:
+            root = Path(work)
+            game = root / "game"
+            init(game)
+            server = game / SERVER_PATH
+            shared = game / SHARED_PATH
+            tab(shared / "buildout/buildout_scenes.tab", ("sceneName",), ("s",), ("tatooine",))
+            tab(shared / "buildout/areas_tatooine.tab",
+                ("area", "x1", "z1", "x2", "z2"), ("s", "f", "f", "f", "f"),
+                ("settlement", -1000, -3000, 0, -2000))
+            tab(server / "mob/creatures.tab", ("creatureName",), ("s",),
+                ("fixture_guard",), ("fixture_captain",), ("fixture_egg_guard",))
+
+            building = "object/building/fixture/house.iff"
+            cell = "object/cell/cell.iff"
+            egg = "object/tangible/creature_spawner/fixture_egg.iff"
+            prop = "object/tangible/fixture_sign.iff"
+            master = "theme_park.fixture.masterspawner"
+            table_script = "theme_park.fixture.table_spawner"
+            egg_script = "creature_spawner.fixture_egg"
+            table = "datatables/spawning/building_spawns/fixture_house.iff"
+            tab(server / "buildout/tatooine/settlement.tab",
+                ("objid", "container", "server_template_crc", "cell_index", "px", "py", "pz",
+                 "qw", "qx", "qy", "qz", "scripts", "objvars"),
+                ("i", "i", "h", "i", "f", "f", "f", "f", "f", "f", "f", "s", "p"),
+                (101, 0, building, 0, 25, 8, 40, 1, 0, 0, 0, master, f"fixture.table|4|{table}|"),
+                (102, 101, cell, 1, 3, 0, 4, 1, 0, 0, 0, "", ""),
+                (103, 102, egg, 1, 7, 0, 8, 1, 0, 0, 0, "", ""))
+            save(server.parent / "object/building/fixture/house.tpf",
+                 '@base object/building/fixture/base.iff\n'
+                 'scripts = +["theme_park.fixture.decorator"]\n'
+                 'sharedTemplate = "object/building/fixture/shared_house.iff"\n')
+            save(server.parent / "object/building/fixture/base.tpf", f'scripts = ["{table_script}"]\n')
+            save(shared.parent / "object/building/fixture/shared_house.tpf",
+                 'portalLayoutFilename = "appearance/fixture_house.pob"\n')
+            save(server.parent / "object/tangible/creature_spawner/fixture_egg.tpf", f'scripts = ["{egg_script}"]\n')
+            save(server.parent / "object/tangible/fixture_sign.tpf", "")
+            save(server.parent / "script/theme_park/fixture/masterspawner.java", f"""
+                public int OnInitialize(obj_id self) {{
+                    spawn("fixture_guard", 2.0f, .5f, -4.0f, getCellId(self, "lobby"));
+                    spawnCaptain(self);
+                    return SCRIPT_CONTINUE;
+                }}
+                private void spawnCaptain(obj_id building) {{
+                    location where = getLocation(building);
+                    where.x = 3;
+                    where.y = 2;
+                    where.z = -1;
+                    where.cell = getCellId(building, "lobby");
+                    create.staticObject("fixture_captain", where);
+                }}
+                private obj_id spawn(String ref, float x, float y, float z, obj_id cell) {{
+                    location where = new location(x, y, z, "tatooine", cell);
+                    return ref.endsWith(".iff") ? createObject(ref, where) : create.object(ref, where);
+                }}
+            """)
+            save(server.parent / "script/theme_park/fixture/table_spawner.java", """
+                public int OnInitialize(obj_id self) {
+                    String table = getStringObjVar(self, "fixture.table");
+                    spawning.spawnObjectsInDungeonFromTable(self, "tatooine", table);
+                    String unused = "datatables/spawning/building_spawns/fixture_unused.iff";
+                    return SCRIPT_CONTINUE;
+                }
+            """)
+            save(server.parent / "script/creature_spawner/fixture_egg.java", """
+                public int OnInitialize(obj_id self) {
+                    create.object("fixture_egg_guard", getLocation(self));
+                    return SCRIPT_CONTINUE;
+                }
+            """)
+            tab(server / "spawning/building_spawns/fixture_house.tab",
+                ("object", "room", "loc_x", "loc_y", "loc_z"), ("s", "s", "f", "f", "f"),
+                (prop, "LOBBY", -2, 0.25, 6), (prop, "missing_room", 1, 2, 3))
+            tab(server / "spawning/building_spawns/fixture_unused.tab",
+                ("object", "room", "loc_x", "loc_y", "loc_z"), ("s", "s", "f", "f", "f"),
+                (prop, "lobby", 99, 99, 99))
+            stf(root / "client/string/en/fixture.stf", name="Fixture")
+            cells = iff_form(b"CELS", *(iff_form(b"CELL", iff_form(b"0005",
+                          iff_chunk(b"DATA", b"\0" * 5 + name + b"\0\0\0"))) for name in (b"exterior", b"lobby")))
+            save(root / "client/appearance/fixture_house.pob",
+                 iff_form(b"PRTO", iff_form(b"0004", cells, iff_chunk(b"CRC ", struct.pack("<I", 123)))))
+            commit(game)
+            config = root / "sources.json"
+            save(config, json.dumps({"sources": {"dsrc": {"path": "game"}, "clientdata": {"path": "client"}}}))
+            profile = load_profile(config, root)
+
+            build(profile.database, profile)
+            catalog = Catalog(profile.database)
+            ident = "tatooine/building/101"
+            data = catalog.entity("locations", ident)["data"]
+            lobby, = data["cells"]
+            self.assertEqual(lobby["name"], "lobby")
+            self.assertCountEqual([obj["template"] for obj in lobby["contents"]],
+                                  [prop, egg, "fixture_guard", "fixture_captain"])
+            captain = next(obj for obj in lobby["contents"] if obj["template"] == "fixture_captain")
+            self.assertEqual(captain["coordinates"], [-969, 10, -2957])
+            sign = next(obj for obj in lobby["contents"] if obj["template"] == prop)
+            self.assertEqual(sign["target"], ["items", prop])
+            self.assertEqual(sign["coordinates"], [-974, 8.25, -2950])
+            self.assertEqual(sign["spawn_origin"]["type"], "Building master spawner")
+            self.assertEqual(sign["spawn_origin"]["script"], table_script)
+            self.assertEqual(sign["spawn_origin"]["table_source"]["line"], 3)
+            self.assertEqual(sign["spawn_origin"]["attachments"][0]["kind"], "template")
+            self.assertTrue(sign["spawn_origin"]["attachments"][0]["path"].endswith("/fixture/base.tpf"))
+            only_sign, = catalog.placements("items", prop)["rows"]
+            self.assertEqual((only_sign["map_location"], only_sign["cell_index"], only_sign["method"]),
+                             (ident, 1, "Building master spawner"))
+
+            stranger, = data["unresolved_cells"]["missing_room"]
+            self.assertIsNone(stranger["coordinates"])
+            self.assertEqual(stranger["local_coordinates"], [1, 2, 3])
+            guard = next(obj for obj in lobby["contents"] if obj["template"] == "fixture_guard")
+            self.assertEqual(guard["target"], ["npcs", "fixture_guard"])
+            self.assertEqual(guard["coordinates"], [-970, 8.5, -2960])
+            self.assertEqual(guard["spawn_origin"]["attachments"][0]["kind"], "buildout")
+            self.assertEqual(guard["spawn_origin"]["caller_source"]["line"], 3)
+            direct, = catalog.placements("npcs", "fixture_guard", scene="tatooine")["rows"]
+            self.assertEqual((direct["map_location"], direct["spawn_origin"]["script"]), (ident, master))
+            egg_row = next(obj for obj in lobby["contents"] if obj["template"] == egg)
+            configured, = egg_row["spawner"]["entries"]
+            self.assertEqual(configured["npc"], "fixture_egg_guard")
+            self.assertEqual(egg_row["origin"], "server_buildout")
+            from_egg, = catalog.placements("npcs", "fixture_egg_guard", scene="tatooine")["rows"]
+            self.assertEqual(from_egg["spawner_template"], egg)
+
     def test_selected_github_repository_keeps_paths_in_an_extracted_deployment(self):
         with TemporaryDirectory() as work:
             root = Path(work)

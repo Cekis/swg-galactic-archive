@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from catalog_sources import ROOT, SERVER, SHARED, read_iff_table
+from catalog_sources import ROOT, SERVER, SHARED, read_iff_table, source
 from catalog_iff import block_positions, form
 
 BUILDOUT = SHARED / "buildout"
@@ -50,7 +50,9 @@ ENCOUNTER_SPAWNERS = {
 SPECIAL_SPAWNERS = (FORMATION_SPAWNER, HRACCA_SPAWNER, BET_SPAWNER, OUTBREAK_SPAWNER,
                     DELIVERY_SPAWNER, JAWA_SPAWNER, DUMPSTER_SPAWNER, *ENCOUNTER_SPAWNERS)
 CELEBRITY_SPAWNER = "npc.celebrity.celebrity_spawner"
-BUILDING_SPAWNER = "theme_park.dungeon.generic_spawner"
+BUILDING_TABLE_SCRIPTS = ("theme_park.dungeon.generic_spawner", "theme_park.dungeon.ep3_clone_relics_generic_spawner")
+MASTER_SPAWNER = "Building master spawner"
+DEDICATED_SPAWNER = "Dedicated spawner object"
 SENTINEL_SPAWNERS = {
     f"object/tangible/jedi/jedi_sentinel_{side}_spawner.iff": f"creature_spawner.jedi_sentinel_{side}_spawner"
     for side in ("dark", "light")
@@ -493,16 +495,18 @@ class LocationIndex:
             if not self.files.exists(path):
                 break
             text = self.files.text(path)
-            chain.append(text)
+            chain.append((path, text))
             base = TEMPLATE_BASE.search(text)
             template = base[1] if base else None
-        scripts = set()
+        scripts = {}
         variables = {}
-        for text in reversed(chain):
+        for path, text in reversed(chain):
             if match := SCRIPT_ARRAY.search(text):
                 if not match[1]:
                     scripts.clear()
-                scripts.update(re.findall(r'"([\w.]+)"', match[2]))
+                for name in re.finditer(r'"([\w.]+)"', match[2]):
+                    line = 1 + text.count("\n", 0, match.start(2) + name.start())
+                    scripts[name[1].removeprefix("script.")] = source(path, line)
             if match := TEMPLATE_VARS.search(text):
                 if not match[1]:
                     variables.clear()
@@ -654,7 +658,9 @@ class LocationIndex:
     def _index_buildout_npc(self, record, scripts, raw_vars):
         inherited, defaults = self._template_spawn_settings(record.template)
         attached = {name.removeprefix("script.") for name in re.split(r"[:,\s]+", scripts.strip('"')) if name}
-        scripts = inherited | attached
+        scripts = {name: [{"kind": "template", **proof}] for name, proof in inherited.items()}
+        for name in sorted(attached):
+            scripts.setdefault(name, []).append({"kind": "buildout", **record.source})
         if scripts or "spawn" in record.template or "/lair/" in record.template:
             self.script_sites[record] = (scripts, raw_vars)
         if record.template.startswith(NPC_TEMPLATES):
@@ -679,7 +685,8 @@ class LocationIndex:
             self._record_spawner(record, config, "configured_spawner", area=bool(config.get("radius")),
                                  register_mobs=special not in (FORMATION_SPAWNER, JAWA_SPAWNER, *ENCOUNTER_SPAWNERS))
             return
-        if not list_script and CELEBRITY_SPAWNER not in scripts and BUILDING_SPAWNER not in scripts:
+        building_script = next((name for name in BUILDING_TABLE_SCRIPTS if name in scripts), None)
+        if not list_script and CELEBRITY_SPAWNER not in scripts and not building_script:
             spawn_script = next((name for name in sorted(scripts) if "spawner" in name), None)
             if spawn_script and any(part in record.template for part in ("/spawnegg/", "/creature_spawner/", "/spawn_egg.iff")):
                 self._spawner_details[record] = {"type": "Scripted spawn egg", "entries": [],
@@ -708,8 +715,8 @@ class LocationIndex:
             template_evidence = self._celebrity_template(record.template)
             evidence = record.source if overrides.get("spawns") else template_evidence[1] if template_evidence else None
             self._add_celebrity(record, variables["spawns"], evidence)
-        elif BUILDING_SPAWNER in scripts and variables.get("spawn_table"):
-            self._building_spawns.append((record, variables["spawn_table"], variables.get("portalProperty.crc")))
+        elif building_script and variables.get("spawn_table"):
+            self._building_spawns.append((record, building_script, variables["spawn_table"], variables.get("portalProperty.crc")))
 
     def _index_keyed_spawners(self):
         indexes = {}
@@ -802,11 +809,22 @@ class LocationIndex:
         except (OSError, ValueError, IndexError, StopIteration, struct.error):
             return None
 
+    def spawn_origin(self, record, script, script_source, *, table_source=None, caller_source=None):
+        master = record.template.startswith("object/building/")
+        scripts, _ = self.script_sites[record]
+        return {"type": MASTER_SPAWNER if master else DEDICATED_SPAWNER, "script": script,
+                "script_source": script_source, "table_source": table_source, "caller_source": caller_source,
+                "attachments": scripts.get(script, []), "template": None if master else record.template}
+
     def _index_building_spawns(self):
-        for building, table, expected_layout in self._building_spawns:
-            if not re.fullmatch(r"datatables/spawning/[a-z0-9_/-]+\.iff", table):
+        for building, script, table, expected_layout in self._building_spawns:
+            if not re.fullmatch(r"datatables/[a-z0-9_/-]+\.iff", table):
                 continue
             path = SERVER.parent / Path(table).with_suffix(".tab")
+            script_source = self._spawn_script(script)
+            layout = self._portal_rooms(building.template)
+            expected_crc = _object_id(expected_layout) if expected_layout else building.portal_crc
+            verified_layout = layout and (expected_crc is None or expected_crc & 0xffffffff == layout[2] & 0xffffffff)
             for row in self._table(path):
                 spawn_ref = row.get("spawns")
                 local = _vector(row, ("loc_x", "loc_y", "loc_z"))
@@ -819,38 +837,40 @@ class LocationIndex:
                 coordinates, cell = None, None
                 status = "unproved_portal_cell"
                 parent_sources = []
-                if room == "world":
+                exterior = room.casefold() == "world"
+                if exterior:
                     coordinates, status = _display_coordinates(local), "authored_world"
-                else:
-                    layout = self._portal_rooms(building.template)
-                    if layout and (not expected_layout or _object_id(expected_layout) == layout[2]):
-                        cell_indexes = [index for index, name in layout[1].items() if name == room]
-                        parent = self._building_cells[building].get(cell_indexes[0]) if len(cell_indexes) == 1 else None
+                elif room and verified_layout:
+                    matches = [(index, name) for index, name in layout[1].items()
+                               if index and name.casefold() == room.casefold()]
+                    if len(matches) == 1:
+                        index, name = matches[0]
+                        parent = self._building_cells[building].get(index)
+                        parent_transform, status = self._transform(parent or building)
+                        if parent_transform:
+                            coordinates = _display_coordinates(_compose(parent_transform, local, IDENTITY)[0])
+                            status = "transformed_cell"
+                        cell = {"index": index, "name": name, "layout_asset": layout[0]}
                         if parent:
-                            parent_transform, status = self._transform(parent)
-                            if parent_transform:
-                                coordinates = _display_coordinates(_compose(parent_transform, local, IDENTITY)[0])
-                                status = "transformed_cell"
-                            cell = {"object_id": str(parent.object_id) if parent.object_id else None,
-                                    "index": parent.cell_index, "name": room,
-                                    "source": parent.source, "layout_asset": layout[0]}
+                            cell.update(object_id=str(parent.object_id) if parent.object_id else None, source=parent.source)
                             parent_sources.append(parent.source)
                 point = {
                     "scene": building.scene, "coordinates": coordinates, "status": status,
                     "source": source, "kind": "building_spawn", "local_coordinates": _display_coordinates(local),
-                    "coordinate_frame": "world" if room == "world" else "cell",
+                    "coordinate_frame": "world" if exterior else "cell",
                     "cell": cell, "room": room, "name": row.get("name") or None,
                     "area_index": building.area.index if building.area else None,
                     "building_id": str(building.runtime_id) if building.runtime_id else None,
                     "building_key": building.placement_key, "building_source": building.source,
                     "required_event": (building.area.event or None) if building.area else None,
                     "parent_sources": [*parent_sources, building.source],
-                    "map_id": self.map_id_for(building.scene, coordinates),
+                    "anchor_source": building.source, "map_id": self.map_id_for(building.scene, coordinates),
+                    "spawn_origin": self.spawn_origin(building, script, script_source, table_source=source),
                 }
                 self.table_spawn_points.append({**point, "spawn_ref": spawn_ref, "mob_id": mob_id,
                                                 "delay": _numeric(row.get("respawn_time")),
                                                 "trigger": row.get("required_config") or None})
-                if room and room != "world":
+                if room and not exterior:
                     self.building_spawn_points.append({
                         **point, "building_key": building.placement_key, "spawn_ref": spawn_ref, "mob_id": mob_id,
                     })

@@ -394,6 +394,8 @@ def write_catalog(writer, profile):
         if point.get("scene"):
             world(point["scene"])
         for entry in config["entries"]:
+            if item_id := entry.get("item"):
+                items.ensure(item_id)
             if (npc_id := entry.get("npc")) and npc_id not in npcs:
                 npcs[npc_id] = summarize_npc(npc_id, strings, "Placement", template=entry["ref"],
                                              sources=[entry["source"]] if entry.get("source") else [])

@@ -240,7 +240,11 @@ Select it again to reverse the order.
   come from client radar shapes, collision geometry, or appearance bounds
   where only bounds survive. The building page identifies the source used.
   Portal layouts supply cell names and floor plans. Buildouts, snapshots,
-  and configured building spawn tables supply room contents and placements.
+  and master spawner scripts supply room contents and placements. The
+  index follows scripts attached in buildouts and inherited from building
+  templates. Each scripted spawn links to the script and attachment,
+  plus the datatable row when it defines the position. Dedicated spawner
+  objects show their configured targets and counts in their own rows.
   Each object shows world and local coordinates where the source resolves
   them. Local offsets for nested objects are labeled as parent-relative.
   The dashed outline uses client radar, collision, appearance bounds, or

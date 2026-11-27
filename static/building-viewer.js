@@ -233,6 +233,12 @@ export function mountBuildingPlan(host, building, signal, placement) {
     tooltip.hidden = !room;
     if (!room) return;
     tooltip.textContent = (marker ? marker.item.name + " · " : "") + roomSummary(room);
+    const origin = marker?.item.spawn_origin?.type || (marker?.item.spawner && "Dedicated spawner object");
+    if (origin) {
+      const source = document.createElement("small");
+      source.textContent = origin;
+      tooltip.append(source);
+    }
     if (marker?.item.spawner) {
       const detail = document.createElement("small");
       detail.textContent = spawnSummary(marker.item.spawner);

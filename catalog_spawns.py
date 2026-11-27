@@ -6,7 +6,7 @@ from pathlib import PurePosixPath
 import re
 
 from catalog_locations import (
-    IDENTITY, NPC_TEMPLATES, _compose, _display_coordinates, _numeric, _vars, _vector,
+    IDENTITY, NPC_TEMPLATES, OBJECT_ASSET, _compose, _display_coordinates, _numeric, _vars, _vector,
 )
 from catalog_spawn_scripts import Position, SpawnScripts
 from catalog_spawn_tables import SpawnTables, authored_count, row_position, spawn_columns, table_name, table_ref, table_type
@@ -38,6 +38,8 @@ class SpawnIndex:
         self.scenes = set(spatial.maps) | {row.get("planet") for row in spatial._table(SERVER / "region/planets.tab")}
         self.sites = defaultdict(list)
         self.table_sites = defaultdict(dict)
+        self.room_table_sites = defaultdict(dict)
+        self.room_rows = set()
         self.used_lairs = set()
         self.used_rows = set()
         self.records = []
@@ -45,10 +47,17 @@ class SpawnIndex:
         self.templates = {record.template for record in spatial.script_sites if SPAWNER_NAME.search(record.template)}
         self.templates.update(ref for path in files.paths(SERVER_OBJECTS, "*.tpf", recursive=True)
                               if (ref := _template_ref(path)).startswith("object/tangible/") and SPAWNER_NAME.search(ref))
-        self.scripts = SpawnScripts(files, npcs, self.templates, self.scenes).scan()
+        interior_scripts = {script for record, (scripts, _) in spatial.script_sites.items()
+                            if self._interior_host(record) for script in scripts}
+        self.scripts = SpawnScripts(files, npcs, self.templates, self.scenes, interior_scripts).scan()
         self.tables = SpawnTables(files, spatial, self._entry)
 
-    def _entry(self, ref, proof):
+    def _interior_host(self, record):
+        return record.template.startswith("object/building/") or (
+            record.parent and (record.template in self.templates or record in self.spatial._spawner_details)
+        )
+
+    def _entry(self, ref, proof, *, allow_objects=False):
         if not ref or ref.lower() in PLACEHOLDERS:
             return None
         npc = ref
@@ -56,7 +65,7 @@ class SpawnIndex:
             npc = PurePosixPath(ref).stem.removeprefix("shared_")
         if npc in self.npcs or ref.startswith(NPC_TEMPLATES):
             return {"ref": ref, "npc": npc, "source": proof}
-        if ref in self.templates:
+        if ref in self.templates or (allow_objects and OBJECT_ASSET.fullmatch(ref)):
             return {"ref": ref, "item": ref, "source": proof}
         return None
 
@@ -121,7 +130,8 @@ class SpawnIndex:
         if position.frame == "world":
             point.update(coordinates=_display_coordinates(position.xyz), status="authored_world")
         elif position.frame == "cell":
-            point.update(room=position.room, local_coordinates=_display_coordinates(position.xyz), status="unproved_portal_cell")
+            point.update(room=position.room, local_coordinates=_display_coordinates(position.xyz),
+                         coordinate_frame="cell", status="unproved_portal_cell")
             if record and record.scene == point["scene"]:
                 building, cell, coordinates = self._room(record, position.room, position.xyz)
                 if building:
@@ -137,6 +147,12 @@ class SpawnIndex:
             settings = {**inherited, **_vars(raw)}
             for script in sorted(scripts):
                 self.sites[script].append(record)
+                if not self._interior_host(record):
+                    continue
+                for selector, proof in self.scripts.room_tables.get(script, {}).items():
+                    value = settings.get(selector.removeprefix("@objvar/"), "") if selector.startswith("@objvar/") else selector
+                    if ref := table_ref(value):
+                        self.room_table_sites[ref].setdefault(record, {})[script] = proof
             for value in settings.values():
                 if ref := table_ref(value):
                     self.table_sites[ref][record] = record.source
@@ -159,7 +175,11 @@ class SpawnIndex:
                       "configuration_status": "scripted"}
         if not config["entries"] and record.template in self.templates:
             entries = [entry for script in scripts for call in self.scripts.by_script.get(script, ())
-                       if not call.development for entry in self._call_entries(call, settings, record.source)]
+                       if not call.development for entry in self._call_entries(
+                           call, settings, record.source, allow_objects=bool(record.parent and (
+                               call.position.room or call.position.frame == "anchor"
+                           )),
+                       )]
             if entries:
                 config = {**config, "entries": entries, "selection": "conditional", "configuration_status": "configured"}
                 self.specialized.add(record)
@@ -190,11 +210,12 @@ class SpawnIndex:
         for point in self.spatial.table_spawn_points:
             proof = point["source"]
             self.used_rows.add((proof["path"], proof["line"]))
-            entry = self._entry(point["spawn_ref"], proof)
+            interior = bool(point.get("room") and point["coordinate_frame"] == "cell")
+            entry = self._entry(point["spawn_ref"], proof, allow_objects=interior)
             if entry:
                 config = {"type": "Building spawn table", "entries": [{**entry, "count": 1}],
                           "count": 1, "count_label": "Per activation", "source": proof, "delay_min": point["delay"],
-                          "trigger": point["trigger"], "script_source": self.spatial._spawn_script("theme_park.dungeon.generic_spawner")}
+                          "trigger": point["trigger"], "script_source": point["spawn_origin"]["script_source"]}
                 self._keep(point, config, "placed")
         for point in self.spatial._poi_sources.values():
             proof = point["source"]
@@ -270,7 +291,7 @@ class SpawnIndex:
     def _infer_tables(self):
         regions = self._regions()
         self._table_bindings()
-        table_names = set(self.table_sites) | set(self.scripts.by_table)
+        table_names = set(self.table_sites) | set(self.scripts.by_table) | set(self.room_table_sites)
         paths = set(self.files.paths(SERVER, "*.tab", recursive=True))
         for path in sorted(paths):
             relative = path.relative_to(SERVER).as_posix()
@@ -298,12 +319,16 @@ class SpawnIndex:
                 columns = ("TYPE",)
             else:
                 columns = spawn_columns(relative, header)
+            if reference in self.room_table_sites:
+                objects = (key for key in header if key.casefold() in {"object", "template", "spawn_template"})
+                columns = tuple(dict.fromkeys((*columns, *objects)))
             if columns:
                 self._row_sources(relative, reference, rows, columns)
 
     def _row_sources(self, relative, reference, rows, columns):
         script_refs = self.scripts.by_table.get(reference, {})
         bindings = dict(self.table_sites.get(reference, {}))
+        room_bindings = self.room_table_sites.get(reference, {})
         label = table_type(relative)
         parts = relative.split("/")
         if relative.startswith("spawning/ground_spawning/types/"):
@@ -323,38 +348,46 @@ class SpawnIndex:
         default_script = next((proof for proof, development in script_refs.values() if not development), None)
         if not default_script and script_refs:
             default_script = next(iter(script_refs.values()))[0]
+        hosts = [(record, binding, None) for record, binding in bindings.items() if record not in room_bindings]
+        hosts.extend((record, binding, script) for record, scripts in room_bindings.items()
+                     for script, binding in scripts.items())
         for row in rows:
             proof = row.source
             if (proof["path"], proof["line"]) in self.used_rows:
                 continue
-            entries = []
+            room = row.get("room") or row.get("cell") or row.get("cellName")
+            xyz = row_position(row)
+            absolute = room.casefold() == "world" or row.get("location_type") == "literal"
+            entries, room_objects = [], []
             maximum = authored_count(row, "max_number", "max_population")
             for column in columns:
                 value = row.get(column)
                 if not value:
                     continue
                 for ref in re.split(r"[,;:]" if not value.startswith("formation:") else r";", value):
-                    if entry := self._entry(ref.strip(), proof):
-                        entries.append({**entry, "role": column if len(columns) > 1 else None, "maximum": maximum,
+                    ref = ref.strip()
+                    entry = self._entry(ref, proof, allow_objects=bool(room_bindings and room and not absolute))
+                    if entry:
+                        targets = entries if entry.get("npc") or ref in self.templates else room_objects
+                        targets.append({**entry, "role": column if len(columns) > 1 else None, "maximum": maximum,
                                         "count": 1 if "room" in row.cells else None})
-            if not entries:
+            if not entries and not room_objects:
                 continue
             trigger = row.get("triggerId") or row.get("required_config") or row.get("phase") or row.get("stage")
             delay = next((delay for field in ("respawn_time", "respawn", "fltMinSpawnTime")
                           if (delay := _numeric(row.get(field))) is not None and delay >= 0), None)
-            config = {"type": label, "name": row.get("name") or table_name(reference), "entries": entries,
+            config = {"type": label, "name": row.get("name") or table_name(reference),
                       "source": proof, "selection": "conditional", "delay_min": delay,
-                      "delay_max": _numeric(row.get("fltMaxSpawnTime")), "trigger": trigger,
-                      "count": 1 if "room" in row.cells and len(entries) == 1 else None, "count_label": "Per activation"}
-            room = row.get("room") or row.get("cell") or row.get("cellName")
-            xyz = row_position(row)
-            absolute = room == "world" or row.get("location_type") == "literal"
-            row_scene = row.get("planet") or row.get("PLANET") or scene
-            for host, binding in bindings.items() if bindings else ((None, default_script),):
+                      "delay_max": _numeric(row.get("fltMaxSpawnTime")), "trigger": trigger, "count_label": "Per activation"}
+            row_scene = row.get("planet") or row.get("PLANET")
+            for host, binding, script in hosts or ((None, default_script, None),):
                 if isinstance(host, tuple):
                     record, current = None, host[1]
                 else:
-                    record, current = host, row_scene
+                    record, current = host, row_scene or (host.scene if script else scene)
+                options = entries + room_objects if script else entries
+                if not options:
+                    continue
                 if absolute:
                     pos = Position(current or (record.scene if record else None), xyz, frame="world" if xyz else "runtime")
                 elif room and room.lower() != "none":
@@ -366,14 +399,23 @@ class SpawnIndex:
                     point["anchor_source"] = binding
                 scope = "scripted" if (record and record.area) or point["coordinates"] and point["scene"] else (
                     "unregistered" if record else "definition")
-                self._keep(point, {**config, "script_source": binding or default_script}, scope)
-                if record and point.get("building_key") and pos.frame == "cell" and xyz:
-                    self._building_contents(point, entries)
+                if script:
+                    point["name"] = row.get("name") or None
+                    point["spawn_origin"] = self.spatial.spawn_origin(record, script, binding, table_source=proof)
+                    self.room_rows.add((record, script, proof["path"], proof["line"]))
+                count = 1 if "room" in row.cells and len(options) == 1 else None
+                self._keep(point, {**config, "entries": options, "count": count,
+                                   "script_source": binding or default_script}, scope)
+                if record and point.get("building_key") and pos.frame == "cell" and (script or xyz):
+                    self._building_contents(point, options)
 
     def _building_contents(self, point, entries):
         if point.get("room"):
             for entry in entries:
-                self.spatial.building_spawn_points.append({**point, "spawn_ref": entry["ref"], "mob_id": entry.get("npc")})
+                if not entry.get("selector_source"):
+                    self.spatial.building_spawn_points.append({
+                        **point, "spawn_ref": entry["ref"], "mob_id": entry.get("npc"),
+                    })
 
     def _script_calls(self):
         for ident, calls in self.scripts.by_script.items():
@@ -389,22 +431,31 @@ class SpawnIndex:
                 for host in hosts or (None,):
                     if host in self.specialized:
                         continue
+                    table = call.table or {}
+                    if (host, ident, table.get("path"), table.get("line")) in self.room_rows:
+                        continue
                     settings = None
                     if host and call.target.startswith("@objvar/"):
                         _, inherited = self.spatial._template_spawn_settings(host.template)
                         settings = {**inherited, **_vars(self.spatial.script_sites[host][1])}
-                    options = self._call_entries(call, settings, host.source if host else None, expand=True)
+                    interior = host and self._interior_host(host) and call.position.room
+                    options = self._call_entries(call, settings, host.source if host else None,
+                                                 expand=True, allow_objects=bool(interior))
                     if not options:
                         continue
                     point = self._position(call.path, call.position, host)
+                    if interior and point.get("building_key"):
+                        point["spawn_origin"] = self.spatial.spawn_origin(
+                            host, ident, call.path, table_source=call.table, caller_source=call.caller,
+                        )
                     scope = "development" if call.development else "scripted" if (
                         point["coordinates"] and point["scene"] or host and host.area) else "unregistered" if host else "runtime"
                     template = host.template if host and host.template in self.templates else None
                     self._keep(point, {**config, "entries": options}, scope, template)
-                    if host and call.position.xyz and point.get("building_key") and call.position.frame == "cell":
+                    if host and point.get("building_key") and call.position.frame == "cell":
                         self._building_contents(point, options)
 
-    def _call_entries(self, call, settings=None, setting_source=None, *, expand=False):
+    def _call_entries(self, call, settings=None, setting_source=None, *, expand=False, allow_objects=False):
         proof = call.table or call.path
         target = call.target
         if target.startswith("@objvar/"):
@@ -419,8 +470,8 @@ class SpawnIndex:
         if call.mode == "squad":
             return self.tables.ships(target, proof)
         ref = "space/" + target if call.mode == "ship" else target
-        entry = self._entry(ref, proof)
-        if expand and entry and (template := entry.get("item")):
+        entry = self._entry(ref, proof, allow_objects=allow_objects)
+        if expand and entry and (template := entry.get("item")) in self.templates:
             return [entry, *({**spawn, "selector_source": proof, "role": f"Spawned through {table_name(template)}"}
                             for spawn in self._template_creatures(template))]
         return [{**entry, "count": 1}] if entry else []

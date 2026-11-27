@@ -101,6 +101,8 @@ class PlacementWriter:
         }
         if spawner := point.get("spawner"):
             entry["spawner"] = spawner
+        if origin := point.get("spawn_origin"):
+            entry["spawn_origin"] = origin
         if scope:
             entry.update(scope=scope, status=point.get("status"), location_id=point.get("location_id"),
                          anchor_source=point.get("anchor_source"), region_source=point.get("region_source"),
@@ -137,7 +139,8 @@ class PlacementWriter:
                     if not target or target[0] != "items":
                         continue
                     point = {**item, "cell": room["name"]}
-                    method = "Configured spawn" if item["origin"] == "building_spawn" else (
+                    origin = item.get("spawn_origin")
+                    method = origin["type"] if origin else "Configured spawn" if item["origin"] == "building_spawn" else (
                         "Placed spawner" if item.get("spawner") else "Placed object")
                     self.add("items", target[1], scene, site, name, method,
                              point, building=ident, room=room["index"], object_index=index)

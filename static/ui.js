@@ -294,11 +294,13 @@ export function placementResults(result, metadata, filtered, sort) {
       const source = row.related ? link(...row.related) : "";
       const spawner = row.spawner_template ? `<small>${link("items", row.spawner_template, readable(row.spawner_template.split("/").pop().replace(/\.iff$/, "")))}</small>` : "";
       const config = npc && row.spawner ? { ...row.spawner, entries: row.spawner.entries.filter(entry => entry.npc === npc) } : row.spawner;
+      const origin = row.spawn_origin?.type;
       const local = !row.coordinates && row.local_coordinates && row.cell ?
         `<small>Cell coordinates ${copyMarkup(row.local_coordinates.join(", "), coordinateValue(row.local_coordinates), "Copy cell coordinates", "coordinate")}</small>` : "";
       return `<tr><td>${label}${details.length ? `<small>${escapeHTML(details.join(" · "))}</small>` : ""}</td>
         <td>${row.scene ? escapeHTML(locationName(row.scene, metadata)) : '<span class="muted">Unspecified</span>'}</td>
         <td>${escapeHTML(row.spawn_type || row.method)}${row.scope ? `<small>${escapeHTML(scope[row.scope])}</small>` : ""}
+          ${origin && origin !== (row.spawn_type || row.method) ? `<small>${escapeHTML(origin)}</small>` : ""}
           ${spawner}${config ? `<details class="cell-spawn-details"><summary>${escapeHTML(spawnSummary(config))}</summary>${spawnDetails(config, { showType: !npc })}</details>` : ""}
           ${row.event ? `<small>Event ${escapeHTML(readable(row.event))}</small>` : ""}</td>
         <td>${row.coordinates ? worldCoordinates(row.coordinates) : row.scope === "region" ? "Region-wide" :
