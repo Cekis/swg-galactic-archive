@@ -1,5 +1,5 @@
 import {
-  code, columnHeading, copyMarkup, coordinateValue, escapeHTML as h, facts, href, integer, link, linkRows, loadingIndicator, localized, locationId, locationLink, locationName, opt,
+  audioPlayer, code, columnHeading, copyMarkup, coordinateValue, escapeHTML as h, facts, href, integer, link, linkRows, loadingIndicator, localized, locationId, locationLink, locationName, opt,
   pagination, placementSection, plainObject, readable, relatedRows, resourceIcon, searchResultGroups, section, sections, sectionSources,
   sourceText, spawnDetails, spawnSummary, tag, worldBounds, worldCoordinates,
 } from "./ui.js";
@@ -266,7 +266,7 @@ function tabsFor(kind, entity, spawnCount) {
     ["acquisition", "Deeds and recipes"], ["model", "Model"]];
   if (kind === "resources") return [["overview", "Overview"], ["distribution", "Worlds", entity.card.worlds],
     ["schematics", "Recipes", count("schematics")], ["children", "Subclasses", count("children")]];
-  if (kind === "sounds") return [["overview", "Overview"]];
+  if (kind === "sounds") return [["overview", "Overview"], ["locations", "Locations", count("locations")]];
   return [["overview", "Lines", entity.card.line_count], ["references", "References"]];
 }
 
@@ -725,10 +725,6 @@ function standaloneConversation(entity) {
     + conversationContent)}${dynamic}</div>`;
 }
 
-function audioPlayer(id, label) {
-  return `<audio controls preload="none" aria-label="${h(label)}" src="/api/audio?id=${encodeURIComponent(id)}"></audio>`;
-}
-
 function soundOverview(entity) {
   const { card, data, related } = entity;
   const rows = data.samples.length ? data.samples : data.playable;
@@ -741,7 +737,7 @@ function soundOverview(entity) {
     </div>`;
   }).join("");
   const uses = [["templates", "Sound templates"], ["conversations", "Dialogue"], ["npcs", "NPCs"],
-    ["quests", "Quests"], ["ships", "Ships"], ["items", "Items and components"], ["locations", "Locations"]];
+    ["quests", "Quests"], ["ships", "Ships"], ["items", "Items and components"]];
   return `<div class="stack">
     ${section("Playback", samples || '<p class="muted">No playable sample is available in the selected client data.</p>')}
     ${uses.filter(([role]) => related[role]?.count).map(([role, name]) =>
@@ -757,9 +753,11 @@ export function dialogueLines(page, query, filter, sort) {
       <p>${h([use.speaker, readable(use.source_role), alignment[use.alignment]?.[0]].filter(Boolean).join(" · "))}</p>
       ${use.caption ? `<span class="long-text">${h(use.caption)}</span>` : ""}${sourceText(use.source)}</div>`).join("");
     const evidence = usages ? `<details><summary>${line.usages.length} reference${line.usages.length === 1 ? "" : "s"}</summary>${usages}</details>` : "";
-    const audio = (line.sounds || []).map(cue => `<div class="sound-preview">
-      ${cue.clip ? audioPlayer(cue.clip, "Recorded audio for " + line.key) : ""}
-      ${link("sounds", cue.id, "Sound details")}${sourceText(cue.source)}</div>`).join("");
+    const audio = (line.sounds || []).map(cue => {
+      const label = cue.music ? "Music cue" : "Recorded audio";
+      return `<div class="sound-preview">${cue.clip ? audioPlayer(cue.clip, label + " for " + line.key) : ""}
+        ${link("sounds", cue.id, cue.music ? label : "Sound details")}${sourceText(cue.source)}</div>`;
+    }).join("");
     return `<tr><td>${copyMarkup(line.code, line.code, "Copy string code", "copy-code dialog-code")}${line.speakers.length ? `<small class="entity-sub">${h(line.speakers.map(readable).join(", "))}</small>` : ""}</td>
     <td>${line.text != null ? `<p class="long-text">${h(line.text)}</p>` : '<span class="muted">Unresolved</span>'}${audio}</td>
     <td>${captions.map(caption => `<p class="long-text">${h(caption)}</p>`).join("") || "—"}</td>
@@ -784,13 +782,17 @@ export function entityPage(kind, entity, requestedView, metadata) {
   const spawnRooms = kind === "locations" && card.category === "Building" ? buildingSpawnRooms(data) : [];
   const spawnCount = spawnRooms.reduce((total, room) => total + room.contents.length, 0);
   const tabs = tabsFor(kind, entity, spawnCount);
-  if (entity.related.sounds?.count) tabs.push(["sounds", "Sounds", entity.related.sounds.count]);
+  if (kind === "locations" || entity.related.sounds?.count) {
+    tabs.push(["sounds", "Sounds", entity.related.sounds?.count]);
+  }
   const view = tabs.some(([id]) => id === requestedView) ? requestedView : "overview";
   let body;
   if (view === "sounds") {
-    body = section("Associated sounds", relatedRows(kind, card.id, entity, "sounds", "No linked sounds."));
+    const title = kind === "locations" ? "Sounds heard here" : "Associated sounds";
+    body = section(title, relatedRows(kind, card.id, entity, "sounds", "No linked sounds are recorded."));
   } else if (kind === "sounds") {
-    body = soundOverview(entity);
+    body = view === "locations" ? section("Where it plays", relatedRows(
+      kind, card.id, entity, "locations", "No locations are recorded for this sound.")) : soundOverview(entity);
   } else if (view === "dialogue") {
     body = conversationGroup(entity);
   } else if (kind === "quests") {

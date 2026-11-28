@@ -26,6 +26,8 @@ from test_source_profiles import save
 TABLE = "conversation/fixture"
 TEMPLATE = "sound/greeting.snd"
 SAMPLE = "sample/greeting.mp3"
+ALTERNATE_SAMPLE = "sample/greeting.wav"
+MISSING_SAMPLE = "sample/unavailable.wav"
 ENGINE = "object/tangible/ship/components/engine/fixture.iff"
 SCRIPT = Path("dsrc/sku.0/sys.server/compiled/game/script/conversation/fixture.script")
 
@@ -103,10 +105,13 @@ class ClientAssetsTests(unittest.TestCase):
             install = root / "client"
             save(install / "client.cfg", "[SharedFile]\nsearchTree_00_01=game.tre")
             attachment = iff_chunk(b"XXXX", b"clientDataFile\0\x01clientdata/ship/engine.cdf\0")
+            samples = (MISSING_SAMPLE, SAMPLE, ALTERNATE_SAMPLE)
             client_tre(install, "game.tre", {
+                ALTERNATE_SAMPLE: b"variant audio sample",
                 SAMPLE: b"\xff\xfbmock audio sample",
                 TEMPLATE: iff_form(b"SD3D", iff_form(b"SD2D",
-                    iff_chunk(b"0004", struct.pack("<I", 1) + SAMPLE.encode() + b"\0"))),
+                    iff_chunk(b"0004", struct.pack("<I", len(samples)) + b"".join(
+                        sample.encode() + b"\0" for sample in samples)))),
                 "datatables/space/ship_chassis_fixture.iff": native_string_table(
                     (b"component", b"engine"), (b"engine_fixture", b"fixture:engine1")),
                 "object/tangible/ship/attachment/engine/shared_fixture.iff":
@@ -117,8 +122,8 @@ class ClientAssetsTests(unittest.TestCase):
             profile.state.mkdir()
             index = SoundIndex(profile.clientdata, ModelLibrary(profile.clientdata))
             index.inventory()
-            strings = SimpleNamespace(conversation_names=lambda: [TABLE],
-                                      table=lambda _: ({"s_1": "Hello", "s_10": "Hello again", "s_2": "Goodbye"}, None))
+            strings = SimpleNamespace(conversation_names=lambda: [TABLE], table=lambda _: (
+                {"s_1": "Hello", "s_10": "Hello again", "s_11": "The same recording", "s_2": "Goodbye"}, None))
             dialogue = DialogueIndex(strings, ["quest/fixture"])
             dialogue.scan_script("conversation.fixture", SCRIPT, """
 public int cue(obj_id speaker) {
@@ -133,6 +138,9 @@ public String reply(obj_id speaker, String response) {
     } else if (response.equals("repeat")) {
         cue(speaker);
         message = new string_id("conversation/fixture", "s_10");
+    } else if (response.equals("direct")) {
+        play2dNonLoopingSound(speaker, "sample/greeting.mp3");
+        message = new string_id("conversation/fixture", "s_11");
     } else {
         message = new string_id("conversation/fixture", "s_2");
     }
@@ -143,7 +151,7 @@ public String reply(obj_id speaker, String response) {
             writer = Writer(profile.database)
             try:
                 for kind, ident in (("quests", "quest/fixture"), ("npcs", "fixture")):
-                    writer.entity(kind, ident, "Fixture", {})
+                    writer.entity(kind, ident, "Fixture", {"locations": []} if kind == "npcs" else {})
                     writer.link(kind, ident, "dialogue", "conversations", TABLE)
                 writer.entity("ships", "fixture", "Fixture ship", {})
                 writer.entity("items", ENGINE, "Fixture engine", {})
@@ -166,7 +174,30 @@ public String reply(obj_id speaker, String response) {
             self.assertEqual(lines[0]["sounds"][0]["clip"], SAMPLE)
             self.assertNotIn("sounds", catalog.dialogue(TABLE, "s_2", "", 1, 20)["rows"][0])
             sound = catalog.entity("sounds", TEMPLATE)
-            self.assertEqual(sound["data"]["playable"], [SAMPLE])
+            self.assertEqual(sound["data"]["playable"], [SAMPLE, ALTERNATE_SAMPLE])
+            npc = catalog.entity("npcs", "fixture")
+            sound_rows = npc["related"]["sounds"]["rows"]
+            self.assertEqual(npc["related"]["sounds"]["count"], 3)
+            self.assertEqual({row["id"]: row["clip"] for row in sound_rows},
+                {TEMPLATE: SAMPLE, ALTERNATE_SAMPLE: ALTERNATE_SAMPLE, MISSING_SAMPLE: None})
+            preview = sound_rows[0]
+            self.assertEqual(preview["id"], TEMPLATE)
+            self.assertEqual(preview["sound_aliases"], [SAMPLE])
+            self.assertEqual({line["code"] for line in preview["detail"]["dialogue_lines"]},
+                {"@conversation/fixture:s_1", "@conversation/fixture:s_10", "@conversation/fixture:s_11"})
+            sample = catalog.entity("sounds", SAMPLE)
+            self.assertEqual(sample["related"]["templates"]["rows"][0]["id"], TEMPLATE)
+            later = catalog.links("npcs", "fixture", "sounds", 2, 1)
+            self.assertEqual(later["total"], 3)
+            later_rows = later["rows"]
+            self.assertEqual(later_rows, sound_rows[1:2])
+            self.assertEqual(later_rows[0]["id"], ALTERNATE_SAMPLE)
+            self.assertEqual(later_rows[0]["card"]["name"], preview["card"]["name"])
+            self.assertEqual(catalog.links("npcs", "fixture", "sounds", 3, 1)["rows"], sound_rows[2:])
+            for kind, ident in (("ships", "fixture"), ("items", ENGINE)):
+                related = catalog.links(kind, ident, "sounds", 1, 10)
+                self.assertEqual({row["id"] for row in related["rows"]}, {TEMPLATE, ALTERNATE_SAMPLE, MISSING_SAMPLE})
+                self.assertEqual(related["total"], 3)
             self.assertEqual(sound["related"]["items"]["rows"][0]["id"], ENGINE)
             self.assertEqual(sound["related"]["ships"]["rows"][0]["id"], "fixture")
             self.assertEqual(sound["related"]["npcs"]["rows"][0]["id"], "fixture")
@@ -184,7 +215,7 @@ public String reply(obj_id speaker, String response) {
             with patch("build_deployment.audit_in_parallel", return_value=({}, set())):
                 identity, paths, _ = trace(catalog, profile)
             expected_file = "clientdata/" + SAMPLE
-            self.assertEqual(set(paths), {expected_file})
+            self.assertEqual(set(paths), {expected_file, "clientdata/" + ALTERNATE_SAMPLE})
             assets = describe_assets(paths, ())
             package = root / "fixture.zip"
             write_package(package, "embedded", paths, assets, profile.database, "checksum", identity, b"", {})
@@ -200,17 +231,83 @@ public String reply(obj_id speaker, String response) {
                     shutil.copyfile(static / name, renderer / name)
                 script = """
 import { readFileSync } from "node:fs";
+import { linkRows } from "./ui.js";
 import { dialogueLines, entityPage } from "./views.js";
-const { sound, page } = JSON.parse(readFileSync(0, "utf8"));
-console.log(dialogueLines(page, "", "", ""));
-console.log(entityPage("sounds", sound, "overview", {}).html);
+const { sound, npc, laterRows, page } = JSON.parse(readFileSync(0, "utf8"));
+console.log(JSON.stringify({
+    dialogue: dialogueLines(page, "", "", ""),
+    sound: entityPage("sounds", sound, "overview", {}).html,
+    npc: entityPage("npcs", npc, "sounds", {}).html,
+    more: linkRows(laterRows),
+}));
 """
                 rendered = subprocess.run([node, "--input-type=module", "-e", script], cwd=renderer,
-                    input=json.dumps({"sound": sound, "page": {"rows": lines, "total": 1, "page": 1, "size": 20}}),
+                    input=json.dumps({"sound": sound, "npc": npc, "laterRows": later_rows,
+                        "page": {"rows": lines, "total": 1, "page": 1, "size": 20}}),
                     capture_output=True, encoding="utf-8")
                 self.assertEqual(rendered.returncode, 0, rendered.stderr)
-                self.assertIn('<audio controls preload="none"', rendered.stdout)
-                self.assertIn("?line=%40conversation%2Ffixture%3As_1", rendered.stdout)
+                pages = json.loads(rendered.stdout)
+                self.assertIn('<audio controls preload="none"', pages["dialogue"])
+                self.assertIn("?line=%40conversation%2Ffixture%3As_1", pages["sound"])
+                self.assertEqual(pages["npc"].count('src="/api/audio?id=sample%2Fgreeting.mp3"'), 1)
+                self.assertIn('href="/sounds/sound%2Fgreeting.snd"', pages["npc"])
+                self.assertIn('href="/sounds/sample%2Fgreeting.mp3"', pages["sound"])
+                self.assertIn('src="/api/audio?id=sample%2Fgreeting.wav"', pages["more"])
+                self.assertIn("Sample unavailable", pages["npc"])
+                self.assertNotIn("/api/audio?id=sample%2Funavailable.wav", pages["npc"])
+
+
+    def test_recorded_dialogue_precedes_model_sounds_and_reaches_the_legacy_contact(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            active = "fixture_npc"
+            legacy = "conversation.station_actor"
+            voiced_table = "conversation/station_actor2"
+            legacy_table = "conversation/station_actor"
+            other = "another_actor"
+            template, clip = "sound/station_voice.snd", "sample/station_voice.wav"
+            footsteps = "sample/a_footstep.wav"
+            model = "object/mobile/station_actor.iff"
+            proof = {"path": "dsrc/conversation/station_actor2.java", "line": 20}
+            save(root / clip, b"voice")
+            save(root / footsteps, b"step")
+            save(root / template, iff_form(b"SD2D", iff_chunk(
+                b"0004", struct.pack("<I", 1) + clip.encode() + b"\0")))
+
+            index = SoundIndex(root, ModelLibrary(root))
+            index.inventory()
+            strings = SimpleNamespace(table=lambda _: ({"s_231": "Meet me at the cantina."}, None))
+            dialogue = SimpleNamespace(strings=strings, audio={(voiced_table, "s_231"): [(template, proof)]})
+            writer = Writer(root / "catalog.sqlite3")
+            try:
+                for ident, category, table in ((active, "NPC", voiced_table), (legacy, "Quest contact", legacy_table),
+                                               (other, "NPC", "conversation/other_actor")):
+                    writer.entity("npcs", ident, "Station Actor", {"locations": [], "model_asset": model}, category=category)
+                    writer.link("npcs", ident, "dialogue", "conversations", table, {"script": table.replace("/", ".")})
+                    index.use(writer, footsteps, "npcs", ident, proof, "Character model sound")
+                index.dialogue(writer, dialogue)
+                index.use(writer, template, "npcs", active, proof, "Authored sound reference")
+                index.publish(writer)
+                writer.finish({"revision": "fixture", "locations": {}, "maps": {}})
+            finally:
+                writer.connection.close()
+
+            catalog = Catalog(root / "catalog.sqlite3")
+            for npc in (active, legacy):
+                with self.subTest(npc=npc):
+                    page = catalog.links("npcs", npc, "sounds", 1, 1)
+                    row = page["rows"][0]
+                    self.assertEqual(page["total"], 2)
+                    self.assertEqual(row["id"], template)
+                    self.assertEqual(row["clip"], clip)
+                    line, = row["detail"]["dialogue_lines"]
+                    self.assertEqual(line["code"], "@conversation/station_actor2:s_231")
+                    self.assertEqual(line["text"], "Meet me at the cantina.")
+                    self.assertEqual(line["source"], proof)
+                    self.assertEqual(line.get("recorded_npc"), active if npc == legacy else None)
+                    self.assertEqual(catalog.links("npcs", npc, "sounds", 2, 1)["rows"][0]["id"], footsteps)
+            self.assertEqual([row["id"] for row in catalog.links("npcs", other, "sounds", 1, 10)["rows"]], [footsteps])
+            self.assertNotIn((legacy_table, "s_231"), index.line_audio)
 
 
 if __name__ == "__main__":

@@ -21,12 +21,14 @@ from catalog_loot import index_npc_loot
 from catalog_dialogue import DialogueIndex
 from catalog_entities import Items, item_ref, load_npcs, load_places, summarize_npc
 from catalog_inventory import publish_inventory
+from catalog_location_audio import LocationAudio
 from catalog_location_hierarchy import LOCATION_ALIASES, authored_ground_worlds, canonical_location, publish_location_hierarchy
 from catalog_locations import LocationIndex
 from catalog_lore import add_location_descriptions, load_client_landmarks
 from catalog_map import LAYERS
 from catalog_models import ModelLibrary
 from catalog_npc_models import NpcModels
+from catalog_npc_speech import index_npc_speech
 from catalog_sounds import SoundIndex
 from catalog_spawns import SpawnIndex
 from catalog_sources import (
@@ -504,9 +506,21 @@ def write_catalog(writer, profile, issues):
                                 asset_overlay=profile.overlay)
     sounds = SoundIndex(clientdata, audio_models)
     sounds.inventory()
+    print("Resolving ambient audio from terrain, interiors, and location scripts", flush=True)
+    ambient = LocationAudio(writer, sounds, places, issues)
+    ambient.outdoor()
+    ambient.interiors()
+    ambient.nebulae()
+    areas = placement_areas(places)
+    ambient.scripted(files, spatial, lambda point: nearby_places(point, areas))
+    location_sound_coverage = ambient.publish()
+    del ambient
+    print("Resolving NPC speech, comms, and cinematic subtitles", flush=True)
+    comms = index_npc_speech(writer, files, dialogue)
+    # Keep exact dialogue evidence when the script also supplies a generic sound reference.
+    sounds.dialogue(writer, dialogue, comms)
     sounds.authored(writer, files)
     sounds.engines(writer, files)
-    sounds.dialogue(writer, dialogue)
     sounds.publish(writer, issues)
 
     dialogue_stats = Counter()
@@ -540,6 +554,7 @@ def write_catalog(writer, profile, issues):
                           "legacy_descriptions": len(legacy),
                           "spawn_coverage": {**spawns.stats, **spawns.scripts.stats},
                           "model_coverage": model_coverage, "loot_coverage": loot_coverage,
+                          "location_sound_coverage": location_sound_coverage,
                           "systems": manifest.get("other_quest_systems", [])}, spawns)
 
 

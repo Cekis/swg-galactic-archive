@@ -189,7 +189,8 @@ function initDetail(state, search, signal, pager) {
   if (!table) return;
   const select = main.querySelector("#linked-dialogue");
   if (select) select.value = table;
-  dialogState = { state, table, query: search.get("line") || "", filter: "", sort: "", page: 1, signal, nonce: 0 };
+  const npc = state.kind === "npcs" ? state.id : search.get("npc") || "";
+  dialogState = { state, table, npc, query: search.get("line") || "", filter: "", sort: "", page: 1, signal, nonce: 0 };
   loadLines(dialogState);
 }
 
@@ -373,7 +374,7 @@ async function showModel(state, signal, variant) {
 }
 
 async function loadLines(state, paging = false, sortKey) {
-  const { table, query, filter, sort, page, signal } = state;
+  const { table, npc, query, filter, sort, page, signal } = state;
   const target = main.querySelector("#dialogue-lines");
   const contacts = main.querySelector("#dialogue-npcs");
   if (contacts.dataset.table !== table) contacts.replaceChildren();
@@ -387,7 +388,7 @@ async function loadLines(state, paging = false, sortKey) {
     main.querySelector("#open-conversation").href = href("conversations", table);
   }
   try {
-    const result = await getJSON("/api/dialogue", { table, q: query, status: filter, sort, page, size: 35 }, signal);
+    const result = await getJSON("/api/dialogue", { table, q: query, status: filter, sort, page, size: 35, npc }, signal);
     if (signal.aborted || nonce !== state.nonce) return;
     if (contacts.dataset.table !== table) {
       contacts.innerHTML = dialogueNpcs(table, result.npcs);

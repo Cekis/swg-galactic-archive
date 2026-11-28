@@ -208,6 +208,15 @@ Select it again to reverse the order.
   conversations, NPCs, locations, ships, or items that reference it. Engine
   component links come from the ship’s authored attachment data. The page
   shows whether a referenced sample is present in the selected client.
+  Play linked clips directly from an object's Sounds tab. Entries that
+  preview the same client sample share one player. Open a sound template
+  to see its full sample list. NPC Sounds tabs put recorded dialogue first
+  and link to the matching line by string code. NPC Dialogue tabs play recordings
+  inline for conversations, scripted comms, and cinematic sequences.
+  Location Sounds tabs include outdoor environment profiles, building cells,
+  nebulae, and scripted playback with a resolved location. A sound's
+  Locations tab links back to those places and shows playback conditions
+  such as time of day, weather, room, or event.
 - **NPCs** include authored creature profiles, space mobiles, placed NPCs,
   and quest contacts. Their Quests tab shows series starters by default,
   with continuations listed as other offers. A start is based on the

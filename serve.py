@@ -264,7 +264,8 @@ class ArchiveHandler(BaseHTTPRequestHandler):
         query = field("q", maximum=160)
         status = field("status")
         if path == "/api/dialogue":
-            result = catalog.dialogue(field("table"), query, status, page, size, sort_order(DIALOGUE_SORT))
+            result = catalog.dialogue(field("table"), query, status, page, size, sort_order(DIALOGUE_SORT),
+                                      npc=field("npc"))
             self.json(result) if result is not None else self.missing("Conversation")
             return
         if path == "/api/search":

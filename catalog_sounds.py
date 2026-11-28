@@ -63,7 +63,7 @@ def template_samples(data):
     return list(dict.fromkeys(samples))
 
 
-def _played(parsed, method, symbols):
+def played_sounds(parsed, method, symbols):
     for call in CALL.finditer(method.body):
         if call[1].lower() in PLAY_CALLS:
             for arg in arguments(method.body, call.end() - 1):
@@ -71,9 +71,34 @@ def _played(parsed, method, symbols):
                     yield call.start(), ident, parsed.evidence(method, call.start())
 
 
+def audio_for_lines(body, lines, cues):
+    """Match explicit playback calls to the single identified line within each script block."""
+    if not lines or not cues:
+        return
+    events = [(offset, "sound", (audio, proof)) for offset, audio, proof in cues]
+    events.extend((offset, "line", line) for offset, line in lines)
+    events.extend((token.start(), token[0], None) for token in BLOCK.finditer(body)
+                  if token[0] in ("{", "}"))
+    scopes = [defaultdict(list)]
+    completed = []
+    for _, event, value in sorted(events, key=lambda row: row[0]):
+        if event == "{":
+            scopes.append(defaultdict(list))
+        elif event == "}" and len(scopes) > 1:
+            completed.append(scopes.pop())
+        else:
+            scopes[-1][event].append(value)
+    for scoped in [*completed, *scopes]:
+        matched = set(scoped["line"])
+        if len(matched) == 1:
+            line = next(iter(matched))
+            for ident, proof in scoped["sound"]:
+                yield line, ident, proof
+
+
 def voiced_lines(parsed, symbols, default):
-    """Associate an explicit playback call and a single NPC message in the same branch."""
-    played = {name: list(_played(parsed, method, symbols)) for name, method in parsed.methods.items()}
+    """Resolve voice cues authored by generated conversation scripts."""
+    played = {name: list(played_sounds(parsed, method, symbols)) for name, method in parsed.methods.items()}
     for name, method in parsed.methods.items():
         cues = list(played[name])
         for call in CALL.finditer(method.body):
@@ -81,7 +106,7 @@ def voiced_lines(parsed, symbols, default):
                 cues.extend((call.start(), audio, proof) for _, audio, proof in played[call[1]])
         if not cues:
             continue
-        events = [(offset, "sound", (audio, proof)) for offset, audio, proof in cues]
+        lines = []
         for call in TEXT_CALL.finditer(method.body):
             args = arguments(method.body, call.end() - 1)
             if len(args) != 2:
@@ -91,26 +116,43 @@ def voiced_lines(parsed, symbols, default):
                 table = default
             if isinstance(table, str) and isinstance(key, str):
                 if ref := string_ref(f"@{table}:{key}"):
-                    events.append((call.start(), "line", ref))
-        if not any(event == "line" for _, event, _ in events):
+                    lines.append((call.start(), ref))
+        for (table, key), sound, proof in audio_for_lines(method.body, lines, cues):
+            yield table, key, sound, proof
+
+
+def _music_cue(ident):
+    return ident.startswith(("music/", "player_music/")) or PurePosixPath(ident).name.startswith(("mus_", "music_"))
+
+
+def _alternate_conversation_contacts(db, voiced_tables):
+    """Find script-only contacts whose named model has one authored conversation variant."""
+    contacts = defaultdict(list)
+    variants = defaultdict(set)
+    for npc, name, category, model, table, script in db.execute("""
+        SELECT e.id,e.name,e.category,json_extract(e.data,'$.model_asset'),l.target_id,
+               json_extract(l.detail,'$.script')
+        FROM entity e JOIN link l ON l.kind=e.kind AND l.id=e.id
+        WHERE e.kind='npcs' AND l.role='dialogue' AND l.target_kind='conversations'
+    """):
+        if not model or not table.startswith("conversation/") or script != table.replace("/", "."):
             continue
-        events.extend((token.start(), token[0], None) for token in BLOCK.finditer(method.body)
-                      if token[0] in ("{", "}"))
-        scopes = [defaultdict(list)]
-        completed = []
-        for _, event, value in sorted(events, key=lambda row: row[0]):
-            if event == "{":
-                scopes.append(defaultdict(list))
-            elif event == "}" and len(scopes) > 1:
-                completed.append(scopes.pop())
-            else:
-                scopes[-1][event].append(value)
-        for scoped in [*completed, *scopes]:
-            lines = set(scoped["line"])
-            if len(lines) == 1:
-                table, line = next(iter(lines))
-                for ident, proof in scoped["sound"]:
-                    yield table, line, ident, proof
+        stem = re.sub(r"_?\d+$", "", script)
+        if category == "Quest contact":
+            named_model = display_id(PurePosixPath(model).stem.removeprefix("shared_"))
+            if npc == script and table not in voiced_tables and name.casefold() == named_model.casefold():
+                contacts[model, script].append(npc)
+        elif stem != script:
+            variants[model, stem].add((npc, table))
+
+    matched = defaultdict(list)
+    for key, legacy_ids in contacts.items():
+        choices = variants.get(key, ())
+        if len(choices) == 1:
+            npc, table = next(iter(choices))
+            if table in voiced_tables:
+                matched[npc, table].extend(legacy_ids)
+    return matched
 
 
 class SoundLibrary:
@@ -185,27 +227,61 @@ class SoundIndex:
             writer.link("sounds", sound, kind, kind, target, evidence)
             writer.link(kind, target, "sounds", "sounds", sound, evidence)
 
-    def dialogue(self, writer, dialogue):
+    def dialogue(self, writer, dialogue, comms=()):
         owners = defaultdict(list)
         for kind, ident, table in writer.connection.execute(
-            "SELECT kind,id,target_id FROM link WHERE role='dialogue' AND target_kind='conversations'"
+            """SELECT kind,id,target_id FROM link WHERE role='dialogue' AND target_kind='conversations'
+               AND json_type(detail,'$.speech_keys') IS NULL"""
         ):
             owners[table].append((kind, ident))
-        conversations = defaultdict(dict)
+        voiced_tables = {table for (table, _), cues in dialogue.audio.items()
+                         if any(not _music_cue(ident) for ident, _ in cues)}
+        alternatives = _alternate_conversation_contacts(writer.connection, voiced_tables)
+        recordings = defaultdict(dict)
+
+        def cue(table, key, ident, proof, npc=None):
+            clip = next(iter(self.clip_ids(ident)), None)
+            entry = {"id": ident, "clip": clip, "source": proof}
+            if npc:
+                entry["npc"] = npc
+            self.line_audio[table, key].append(entry)
+            code = f"@{table}:{key}"
+            text = dialogue.strings.table(table)[0].get(key)
+            line = {"table": table, "code": code, "text": text, "source": proof}
+            if _music_cue(ident):
+                entry["music"] = line["music"] = True
+            clips = dict.fromkeys((ident, *self.ensure(ident)["samples"]))
+            for sound in clips:
+                recordings["conversations", table, sound][code] = line
+            return line, clips
+
         for (table, key), cues in dialogue.audio.items():
             for ident, proof in cues:
-                clip = next(iter(self.clip_ids(ident)), None)
-                self.line_audio[table, key].append({"id": ident, "clip": clip, "source": proof})
-                for sound in (ident, *self.ensure(ident)["samples"]):
-                    conversations[sound, table][f"@{table}:{key}"] = proof
+                line, clips = cue(table, key, ident, proof)
                 for kind, target in owners[table]:
-                    self.use(writer, ident, kind, target, proof, "Recorded dialogue")
-        for (sound, table), lines in conversations.items():
-            evidence = {"reason": "Recorded dialogue", "dialogue_lines": [
-                {"code": code, "source": proof} for code, proof in sorted(lines.items())
-            ]}
-            writer.link("sounds", sound, "conversations", "conversations", table, evidence)
-            writer.link("conversations", table, "sounds", "sounds", sound, evidence)
+                    for sound in clips:
+                        recordings[kind, target, sound][line["code"]] = line
+                        if kind == "npcs" and not line.get("music"):
+                            for contact in alternatives.get((target, table), ()):
+                                recordings[kind, contact, sound].setdefault(line["code"], {**line, "recorded_npc": target})
+        for npc, ref, ident, proof in comms:
+            if ref:
+                line, clips = cue(*ref, ident, proof, npc)
+                for sound in clips:
+                    recordings["npcs", npc, sound][line["code"]] = {**line, "npc": npc}
+        for (kind, target, sound), lines in recordings.items():
+            linked_lines = [lines[code] for code in sorted(lines)]
+            evidence = {"reason": "Recorded dialogue", "source": linked_lines[0]["source"],
+                        "dialogue_lines": linked_lines}
+            if all(line.get("music") for line in linked_lines):
+                evidence["reason"] = "Music cue"
+            elif all(line.get("recorded_npc") for line in linked_lines):
+                evidence["reason"] = "Recorded in alternate conversation"
+            writer.link("sounds", sound, kind, kind, target, evidence)
+            writer.link(kind, target, "sounds", "sounds", sound, evidence)
+        for npc, ref, ident, proof in comms:
+            if ref is None:
+                self.use(writer, ident, "npcs", npc, proof, "Comm audio")
 
     def authored(self, writer, files):
         bindings = defaultdict(list)
@@ -229,8 +305,9 @@ class SoundIndex:
                     scripts_by_entity[script].append((kind, ident, None))
             template = data.get("client_template") or data.get("model_asset") or data.get("template")
             if isinstance(template, str) and template.startswith("object/"):
+                description = "Character model sound" if kind == "npcs" else "Client object sound"
                 for sound, proof in self.template_sounds(template):
-                    self.use(writer, sound, kind, ident, proof, "Client object sound")
+                    self.use(writer, sound, kind, ident, proof, description)
 
         for script, path in script_paths(files).items():
             owners = scripts_by_entity.pop(script, ())

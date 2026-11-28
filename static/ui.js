@@ -161,6 +161,25 @@ export function localized(value, empty = "") {
     (value?.code ? copyMarkup(value.code, value.code, "Copy string code", "source copy-code") : "");
 }
 
+export function audioPlayer(id, label) {
+  return `<audio controls preload="none" class="sound-player" aria-label="${escapeHTML(label)}" src="/api/audio?id=${encodeURIComponent(id)}"></audio>`;
+}
+
+function playbackConditions(uses) {
+  if (!uses?.length) return "";
+  const contexts = uses.map(use => {
+    const conditions = [use.label, use.context, use.cells?.join(", "),
+      use.weather_indices?.some(index => Number(index) !== 0) ? "Weather variants " + use.weather_indices.join(", ") : "",
+      use.conditional ? "Depends on terrain filters" : "",
+      use.required_event ? "Requires " + use.required_event : "",
+      use.radius != null ? integer(use.radius) + " m radius" : ""].filter(Boolean);
+    const sources = [use.source, use.terrain, use.portal, use.placement, use.attachment, use.effect];
+    return `<div class="sound-context-use"><p>${escapeHTML(conditions.join(" · "))}</p>
+      ${use.coordinates ? worldCoordinates(use.coordinates) : ""}${sources.map(sourceText).join("")}</div>`;
+  }).join("");
+  return `<details class="sound-context"><summary>Playback conditions</summary>${contexts}</details>`;
+}
+
 export function linkRows(rows) {
   const titles = new Map();
   for (const entry of rows) {
@@ -178,10 +197,30 @@ export function linkRows(rows) {
       entry.detail?.slot, price, pools].filter(Boolean).join(" · ");
     const duplicate = data && (titles.get(data.name) > 1 || entry.detail?.shared_name);
     const dialogue = entry.detail?.dialogue_lines || [];
-    const lines = entry.kind === "conversations" && dialogue.length ? dialogue.map(line =>
-      `<p><a class="dialog-code" href="${href("conversations", entry.id)}?line=${encodeURIComponent(line.code)}">${escapeHTML(line.code)}</a></p>`).join("") : "";
-    return `<div class="rich-row">${data ? link(entry.kind, entry.id, data.name, "entity-name") : code(entry.id)}
-      ${context ? `<p>${escapeHTML(context)}</p>` : ""}${duplicate ? code(entry.id) : ""}${lines}</div>`;
+    const lines = dialogue.map(line => {
+      const table = line.table || (entry.kind === "conversations" ? entry.id : "");
+      if (!table) return "";
+      const params = new URLSearchParams({ line: line.code });
+      if (line.npc) params.set("npc", line.npc);
+      const url = href("conversations", table) + "?" + params;
+      return `<p><a class="dialog-code" href="${escapeHTML(url)}">${escapeHTML(line.text || line.code)}</a>${line.text ?
+        ` <small>${code(line.code)}</small>` : ""}</p>`;
+    }).join("");
+    const uses = entry.detail?.ambient_uses;
+    const name = data ? entry.kind === "locations" && uses?.length ?
+      `<a class="entity-name" href="${href("locations", entry.id)}?view=sounds">${escapeHTML(data.name)}</a>` :
+      link(entry.kind, entry.id, data.name, "entity-name") : code(entry.id);
+    const description = `${name}${context ? `<p>${escapeHTML(context)}</p>` : ""}
+      ${duplicate ? code(entry.id) : ""}${lines}${playbackConditions(uses)}`;
+    if (entry.kind === "sounds") {
+      const player = entry.clip ? audioPlayer(entry.clip, "Play " + (data?.name || entry.id)) :
+        '<p class="muted">Sample unavailable</p>';
+      const assets = (entry.sound_aliases || []).filter(id => id !== entry.clip);
+      const aliases = assets.length ? `<details class="sound-context"><summary>Other sound assets</summary>
+        ${assets.map(id => `<p>${link("sounds", id, id, "source")}</p>`).join("")}</details>` : "";
+      return `<div class="rich-row sound-row"><div class="sound-row-info">${description}${aliases}</div>${player}</div>`;
+    }
+    return `<div class="rich-row">${description}</div>`;
   }).join("");
 }
 

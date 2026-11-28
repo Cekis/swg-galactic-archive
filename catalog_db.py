@@ -16,7 +16,7 @@ from catalog_quest_locations import publish_location_quests
 
 
 KINDS = ("quests", "npcs", "locations", "items", "schematics", "resources", "ships", "conversations", "sounds")
-SCHEMA = 11
+SCHEMA = 13
 SEARCH_INDEX = """CREATE INDEX IF NOT EXISTS entity_search ON entity (kind, search, name COLLATE NOCASE, id)"""
 BROWSE_INDEX = """CREATE INDEX IF NOT EXISTS entity_browse
     ON entity (kind, name COLLATE NOCASE, id, category, status, level, search, card)"""
@@ -57,6 +57,36 @@ DIALOGUE_SORT = {
 
 def packed(data):
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def group_sound_rows(rows):
+    """Use the preview sample's asset ID as the playback identity."""
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["clip"] or row["id"], []).append(row)
+
+    result = []
+    for matches in grouped.values():
+        first = matches[0]
+        if len(matches) == 1:
+            result.append(first)
+            continue
+        template = next((row for row in matches if row["id"].endswith(".snd")), first)
+        detail = dict(first["detail"])
+        lines, uses = {}, {}
+        for row in matches:
+            evidence = row["detail"]
+            for line in evidence.get("dialogue_lines", ()):
+                lines.setdefault((line["code"], line.get("npc")), line)
+            for use in evidence.get("ambient_uses", ()):
+                uses.setdefault(packed(use), use)
+        if lines:
+            detail["dialogue_lines"] = list(lines.values())
+        if uses:
+            detail["ambient_uses"] = list(uses.values())
+        result.append({**template, "detail": detail,
+                       "sound_aliases": [row["id"] for row in matches if row is not template]})
+    return result
 
 
 def sql_sort(fields, sort):
@@ -303,7 +333,8 @@ class Catalog:
             for role, count in db.execute("SELECT role,COUNT(*) FROM link WHERE kind=? AND id=? GROUP BY role",
                                           (kind, ident)):
                 limit = count if kind == "quests" and role == "reward_items" else 60
-                grouped[role] = {"count": count, "rows": self._links(db, kind, ident, role, 1, limit)}
+                total, rows = self._related_page(db, kind, ident, role, 1, limit, count=count)
+                grouped[role] = {"count": total, "rows": rows}
             if kind == "conversations" and not include_dialogue:
                 data.pop("lines", None)
             result = {"card": card, "data": data, "related": grouped}
@@ -418,24 +449,40 @@ class Catalog:
     @staticmethod
     def _links(db, kind, ident, role, page, size):
         rank = "json_extract(l.detail, '$.rank'), " if kind == "locations" and role == "places" else ""
+        if role == "sounds":
+            rank = """CASE
+                WHEN COALESCE(json_extract(l.detail, '$.reason'), '') NOT IN
+                     ('Recorded dialogue', 'Recorded in alternate conversation') THEN 2
+                WHEN substr(l.target_id, -4) = '.snd' THEN 0
+                ELSE 1 END, """
         rows = db.execute(f"""
-            SELECT l.target_kind,l.target_id,l.detail,e.card
+            SELECT l.target_kind,l.target_id,l.detail,e.card,
+                   CASE WHEN l.target_kind='sounds' THEN json_extract(e.data, '$.playable[0]') END
             FROM link l LEFT JOIN entity e ON e.kind=l.target_kind AND e.id=l.target_id
             WHERE l.kind=? AND l.id=? AND l.role=?
             ORDER BY {rank}e.name COLLATE NOCASE,l.target_id LIMIT ? OFFSET ?
         """, (kind, ident, role, size, (page - 1) * size))
         return [{"kind": target_kind, "id": target_id, "detail": json.loads(detail),
-                 "card": json.loads(card) if card else None}
-                for target_kind, target_id, detail, card in rows]
+                 "card": json.loads(card) if card else None,
+                 **({"clip": clip} if target_kind == "sounds" else {})}
+                for target_kind, target_id, detail, card, clip in rows]
+
+    def _related_page(self, db, kind, ident, role, page, size, *, count=None):
+        if role == "sounds":
+            rows = group_sound_rows(self._links(db, kind, ident, role, 1, -1))
+            start = (page - 1) * size
+            return len(rows), rows[start:start + size]
+        if count is None:
+            count = db.execute("SELECT COUNT(*) FROM link WHERE kind=? AND id=? AND role=?",
+                               (kind, ident, role)).fetchone()[0]
+        return count, self._links(db, kind, ident, role, page, size)
 
     def links(self, kind, ident, role, page, size):
         if kind == "locations":
             ident = canonical_location(ident)
         with self.connect() as db:
-            total = db.execute("SELECT COUNT(*) FROM link WHERE kind=? AND id=? AND role=?",
-                               (kind, ident, role)).fetchone()[0]
-            return {"rows": self._links(db, kind, ident, role, page, size), "total": total,
-                    "page": page, "size": size}
+            total, rows = self._related_page(db, kind, ident, role, page, size)
+        return {"rows": rows, "total": total, "page": page, "size": size}
 
     def map_markers(self, scene, layers, bounds, query, columns, rows):
         with self.connect() as db:
@@ -498,7 +545,8 @@ class Catalog:
                     counts[layer] = counts.get(layer, 0) + 1
         return {layer: counts[layer] for layer in AREA_LAYERS if layer in counts}
 
-    def dialogue(self, table, query, status, page, size, sort=""):
+    def dialogue(self, table, query, status, page, size, sort="", *, npc=None):
+        speech_keys = None
         with self.connect() as db:
             row = db.execute("SELECT data FROM entity WHERE kind='conversations' AND id=?", (table,)).fetchone()
             if not row:
@@ -507,8 +555,22 @@ class Catalog:
                 "SELECT COUNT(*) FROM link WHERE kind='conversations' AND id=? AND role='npcs'", (table,)
             ).fetchone()[0]
             npc_rows = self._links(db, "conversations", table, "npcs", 1, 8) if npc_count else []
-        data = json.loads(row[0])
-        lines = data["lines"]
+            if npc:
+                owner = db.execute("""
+                    SELECT json_extract(detail,'$.speech_keys') FROM link
+                    WHERE kind='npcs' AND id=? AND role='dialogue'
+                      AND target_kind='conversations' AND target_id=?
+                """, (npc, table)).fetchone()
+                if owner and owner[0] is not None:
+                    speech_keys = set(json.loads(owner[0]))
+        lines = json.loads(row[0])["lines"]
+        if speech_keys is not None:
+            lines = [line for line in lines if line["key"] in speech_keys]
+        if npc:
+            for line in lines:
+                if line.get("sounds"):
+                    line["sounds"] = [cue for cue in line["sounds"]
+                                      if cue.get("npc") == npc or speech_keys is None and not cue.get("npc")]
         if query:
             term = query.casefold()
             exact = [line for line in lines if line["code"].casefold() == term] if term.startswith("@") else []
