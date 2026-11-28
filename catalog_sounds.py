@@ -1,6 +1,7 @@
 """Index SWG sound templates, playable samples, and authored uses."""
 
-from collections import defaultdict
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from functools import lru_cache
 import json
 from pathlib import PurePosixPath
@@ -21,6 +22,31 @@ PLAY_CALLS = {"play2dnonloopingsound", "play2dloopingsound", "playsound", "playm
 TEXT_CALL = re.compile(r"\bmessage\s*=\s*(?:new\s+)?string_id\s*\(")
 BLOCK = re.compile(r'''"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[{}]''')
 POWER_AUDIO = "datatables/space/ship_power_sounds.iff"
+IMPACT_TABLES = {
+    "datatables/weapon/combat_effects_damage.iff": ("Hit Sound",),
+    "datatables/space/ship_hit_sounds.iff": ("shield", "armor", "component", "chassis"),
+}
+# Audio::SoundCategory in the client tools. Buffered sound only specifies playback behavior.
+MIXER_CATEGORIES = (
+    ("Ambient", "Ambience"), ("Explosion", "Explosions"), ("Item", "Items"),
+    ("Movement", "Movement"), ("User interface", "User interface"), ("Vehicle", "Vehicles"),
+    ("Vocalization", "Vocalizations"), ("Weapon", "Weapons"), ("Background music", "Music"),
+    ("Player music", "Music"), ("Machine", "Machinery"), ("Installation", "Machinery"),
+    ("Combat music", "Music"), ("Voiceover", "Voiceover"), ("Buffered sound", None), ("Buffered music", "Music"),
+)
+VOICE_NAME = re.compile(r"(?:^|_)(?:vo|voiceover)(?:_|[0-9]|$)")
+FOOTSTEP_NAME = re.compile(r"(?:^|_)(?:footsteps?|fs)(?:_|[0-9]|$)")
+IMPACT_NAME = re.compile(r"(?:^|_)(?:hit|impact|damage|hurt|pain)(?:_|[0-9]|$)")
+
+
+@dataclass(frozen=True)
+class SpeechCue:
+    npc: str | None
+    ref: tuple[str, str] | None
+    audio: str
+    source: dict
+    caption_note: str | None = None
+    quest: str | None = None
 
 
 def sound_id(value):
@@ -38,8 +64,8 @@ def sound_refs(text):
             yield ident
 
 
-def template_samples(data):
-    """Read the ordered sample list in native SD2D or SD3D sound templates."""
+def read_sound_template(data):
+    """Read the ordered samples and mixer category from an SD2D or SD3D template."""
     info = next((entry for entry in chunks(memoryview(data)) if entry.form and entry.tag in ("SD2D", "SD3D")), None)
     if info is None:
         raise ValueError("Unrecognized sound template.")
@@ -60,7 +86,14 @@ def template_samples(data):
         if ref := sound_id(body[cursor:stop].decode("ascii")):
             samples.append(ref)
         cursor = stop + 1
-    return list(dict.fromkeys(samples))
+    # Ten 32-bit delay, fade and loop fields follow the names before the category.
+    offset = cursor + 40
+    mixer = None
+    if version.tag != "0004" and len(body) >= offset + 4:
+        category, = struct.unpack_from("<i", body, offset)
+        if 0 <= category < len(MIXER_CATEGORIES):
+            mixer = category
+    return list(dict.fromkeys(samples)), mixer
 
 
 def played_sounds(parsed, method, symbols):
@@ -125,6 +158,28 @@ def _music_cue(ident):
     return ident.startswith(("music/", "player_music/")) or PurePosixPath(ident).name.startswith(("mus_", "music_"))
 
 
+def _inferred_use(ident, mixer):
+    if mixer and mixer[1] in ("Voiceover", "Music"):
+        return mixer[1], "Client mixer category"
+    name = PurePosixPath(ident).stem
+    if ident.startswith("voice/") or VOICE_NAME.search(name):
+        return "Voiceover", "Asset name"
+    if _music_cue(ident):
+        return "Music", "Asset name"
+    if FOOTSTEP_NAME.search(name):
+        return "Footsteps", "Asset name"
+    if name.startswith(("eng_", "engine_")):
+        return "Engines", "Asset name"
+    if name.startswith("wep_imp_") or (IMPACT_NAME.search(name) and
+                                       (not mixer or mixer[1] in ("Weapons", "Explosions", "Vocalizations", "Vehicles"))):
+        return "Damage and impacts", "Asset name"
+    if mixer and mixer[1]:
+        return mixer[1], "Client mixer category"
+    if name.startswith("amb_"):
+        return "Ambience", "Asset name"
+    return None
+
+
 def _alternate_conversation_contacts(db, voiced_tables):
     """Find script-only contacts whose named model has one authored conversation variant."""
     contacts = defaultdict(list)
@@ -180,6 +235,7 @@ class SoundIndex:
         self.library = SoundLibrary(clientdata)
         self.models = models
         self.records = {}
+        self.use_evidence = defaultdict(dict)
         self.line_audio = defaultdict(list)
 
     def ensure(self, ident):
@@ -204,12 +260,17 @@ class SoundIndex:
             if not ident.endswith(".snd"):
                 continue
             path = self.library.path(ident)
+            if not path:
+                continue
             try:
-                samples = template_samples(path.read_bytes()) if path else []
+                samples, mixer = read_sound_template(path.read_bytes())
             except (OSError, ValueError, UnicodeError, struct.error):
                 self.records[ident]["unreadable"] = True
                 continue
             self.records[ident]["samples"] = samples
+            if mixer is not None:
+                self.records[ident]["mixer_category_id"] = mixer
+                self.records[ident]["mixer_category"] = MIXER_CATEGORIES[mixer][0]
             for sample in samples:
                 self.ensure(sample)
 
@@ -220,8 +281,19 @@ class SoundIndex:
         return [sample for sample in record["samples"]
                 if PurePosixPath(sample).suffix in AUDIO_TYPES and self.ensure(sample)["available"]]
 
-    def use(self, writer, ident, kind, target, proof, description=None):
+    def classify(self, ident, use, proof, basis):
+        self.ensure(ident)
+        self.use_evidence[ident].setdefault(use, {"use": use, "basis": basis, "source": proof})
+
+    def is_music(self, ident):
+        mixer = self.ensure(ident).get("mixer_category_id")
+        return _music_cue(ident) or (mixer is not None and MIXER_CATEGORIES[mixer][1] == "Music")
+
+    def use(self, writer, ident, kind, target, proof, description=None, *, sound_use=None):
         evidence = {"source": proof, "reason": description}
+        if sound_use:
+            self.classify(ident, sound_use, proof, description)
+            evidence["sound_uses"] = [sound_use]
         for sound in dict.fromkeys((ident, *self.ensure(ident)["samples"])):
             self.ensure(sound)
             writer.link("sounds", sound, kind, kind, target, evidence)
@@ -235,11 +307,11 @@ class SoundIndex:
         ):
             owners[table].append((kind, ident))
         voiced_tables = {table for (table, _), cues in dialogue.audio.items()
-                         if any(not _music_cue(ident) for ident, _ in cues)}
+                         if any(not self.is_music(ident) for ident, _ in cues)}
         alternatives = _alternate_conversation_contacts(writer.connection, voiced_tables)
         recordings = defaultdict(dict)
 
-        def cue(table, key, ident, proof, npc=None):
+        def cue(table, key, ident, proof, npc=None, caption_note=None):
             clip = next(iter(self.clip_ids(ident)), None)
             entry = {"id": ident, "clip": clip, "source": proof}
             if npc:
@@ -248,7 +320,11 @@ class SoundIndex:
             code = f"@{table}:{key}"
             text = dialogue.strings.table(table)[0].get(key)
             line = {"table": table, "code": code, "text": text, "source": proof}
-            if _music_cue(ident):
+            if caption_note:
+                entry["caption_note"] = line["caption_note"] = caption_note
+            music = self.is_music(ident)
+            self.classify(ident, "Music" if music else "Voiceover", proof, "Dialogue playback")
+            if music:
                 entry["music"] = line["music"] = True
             clips = dict.fromkeys((ident, *self.ensure(ident)["samples"]))
             for sound in clips:
@@ -264,24 +340,31 @@ class SoundIndex:
                         if kind == "npcs" and not line.get("music"):
                             for contact in alternatives.get((target, table), ()):
                                 recordings[kind, contact, sound].setdefault(line["code"], {**line, "recorded_npc": target})
-        for npc, ref, ident, proof in comms:
-            if ref:
-                line, clips = cue(*ref, ident, proof, npc)
-                for sound in clips:
-                    recordings["npcs", npc, sound][line["code"]] = {**line, "npc": npc}
+        for speech in comms:
+            if not speech.ref:
+                continue
+            line, clips = cue(*speech.ref, speech.audio, speech.source, speech.npc, speech.caption_note)
+            if speech.npc:
+                line = {**line, "npc": speech.npc}
+            for sound in clips:
+                if speech.npc:
+                    recordings["npcs", speech.npc, sound][line["code"]] = line
+                if speech.quest:
+                    recordings["quests", speech.quest, sound][line["code"]] = line
         for (kind, target, sound), lines in recordings.items():
             linked_lines = [lines[code] for code in sorted(lines)]
             evidence = {"reason": "Recorded dialogue", "source": linked_lines[0]["source"],
-                        "dialogue_lines": linked_lines}
+                        "dialogue_lines": linked_lines,
+                        "sound_uses": sorted({"Music" if line.get("music") else "Voiceover" for line in linked_lines})}
             if all(line.get("music") for line in linked_lines):
                 evidence["reason"] = "Music cue"
             elif all(line.get("recorded_npc") for line in linked_lines):
                 evidence["reason"] = "Recorded in alternate conversation"
             writer.link("sounds", sound, kind, kind, target, evidence)
             writer.link(kind, target, "sounds", "sounds", sound, evidence)
-        for npc, ref, ident, proof in comms:
-            if ref is None:
-                self.use(writer, ident, "npcs", npc, proof, "Comm audio")
+        for speech in comms:
+            if speech.ref is None and speech.npc:
+                self.use(writer, speech.audio, "npcs", speech.npc, speech.source, "Comm audio")
 
     def authored(self, writer, files):
         bindings = defaultdict(list)
@@ -372,9 +455,10 @@ class SoundIndex:
                     template = f"object/tangible/ship/attachment/engine/shared_{attachment}.iff"
                     for sound, cdf in self.template_sounds(template):
                         proof = {"path": filename, "row": index, "attachment": template, "client_data": cdf["path"]}
-                        self.use(writer, sound, "ships", ship, proof, "Engine attachment")
+                        self.use(writer, sound, "ships", ship, proof, "Engine attachment", sound_use="Engines")
                         if engine:
-                            self.use(writer, sound, "items", engine, proof, f"Engine attachment on {display_id(ship)}")
+                            self.use(writer, sound, "items", engine, proof, f"Engine attachment on {display_id(ship)}",
+                                     sound_use="Engines")
 
         try:
             _, _, rows = read_iff_table(self.library.root / POWER_AUDIO)
@@ -384,9 +468,44 @@ class SoundIndex:
             ship = row.get("type")
             for column, label in (("engine_disabled", "Engine power down"), ("engine_enabled", "Engine power up")):
                 if ship in ships and (ident := sound_id(row.get(column))):
-                    self.use(writer, ident, "ships", ship, {"path": "clientdata/" + POWER_AUDIO, "row": index}, label)
+                    proof = {"path": "clientdata/" + POWER_AUDIO, "row": index}
+                    self.use(writer, ident, "ships", ship, proof, label, sound_use="Engines")
+
+    def impacts(self):
+        for path, columns in IMPACT_TABLES.items():
+            table = self.library.root / path
+            if not table.is_file():
+                continue
+            try:
+                _, _, rows = read_iff_table(table)
+            except (OSError, ValueError, KeyError, AssertionError, struct.error):
+                continue
+            for number, row in enumerate(rows, 1):
+                for column in columns:
+                    if ident := sound_id(row.get(column)):
+                        self.classify(ident, "Damage and impacts", {"path": "clientdata/" + path, "row": number}, column)
+
+    def _classified_uses(self):
+        own, inherited = {}, defaultdict(dict)
+        for ident, record in sorted(self.records.items()):
+            mixer_id = record.get("mixer_category_id")
+            mixer = MIXER_CATEGORIES[mixer_id] if mixer_id is not None else None
+            uses = self.use_evidence.get(ident)
+            if not uses and (inferred := _inferred_use(ident, mixer)):
+                use, basis = inferred
+                uses = {use: {"use": use, "basis": basis, "source": {"path": "clientdata/" + ident}}}
+            own[ident] = uses or {}
+            for sample in record["samples"]:
+                for use in own[ident]:
+                    inherited[sample].setdefault(use, {
+                        "use": use, "basis": "Sound template", "source": {"path": "clientdata/" + ident},
+                    })
+        return {ident: (inherited[ident] | self.use_evidence.get(ident, {})) or uses
+                for ident, uses in own.items()}
 
     def publish(self, writer, report_issue=None):
+        uses_by_sound = self._classified_uses()
+        counts = Counter()
         for ident, record in sorted(self.records.items()):
             if report_issue:
                 if not record["available"]:
@@ -398,7 +517,13 @@ class SoundIndex:
                 writer.link("sounds", ident, "samples", "sounds", sample, proof)
                 writer.link("sounds", sample, "templates", "sounds", ident, proof)
             record["playable"] = self.clip_ids(ident)
+            classifications = uses_by_sound[ident]
+            record["sound_uses"] = sorted(classifications) or ["Unclassified"]
+            record["sound_use_evidence"] = [classifications[use] for use in sorted(classifications)]
+            counts.update(record["sound_uses"])
             category = "Sound template" if ident.endswith(".snd") else "Audio sample"
             writer.entity("sounds", ident, record["name"], record, category=category,
                           status="available" if record["available"] else "referenced",
-                          card={"format": record["format"], "playable": len(record["playable"])})
+                          card={"format": record["format"], "playable": len(record["playable"]),
+                                "sound_uses": record["sound_uses"]})
+        return dict(sorted(counts.items()))

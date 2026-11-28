@@ -6,7 +6,8 @@ import re
 
 from archive_quests.manifest_scripts import assignments, balanced_end
 from catalog_sources import SERVER, Script, arguments, clean_table_name, literal, script_paths, source, string_ref
-from catalog_sounds import audio_for_lines, played_sounds, sound_id
+from catalog_sounds import SpeechCue, audio_for_lines, played_sounds, sound_id
+from catalog_voice_tables import collection_voices, encounter_voices, greeter_voices, quest_voices
 
 
 COMMS = re.compile(r"\b(?:commTutorialPlayer|commPlayers|sendDelayed3poPopup|attachScript|registerSequenceObject)\s*\(")
@@ -45,13 +46,18 @@ def _owned_npcs(db):
         if model:
             templates[model.casefold()].add(ident)
 
-    def resolve(value):
+    def resolve(value, actors=None):
         if not isinstance(value, str):
             return None
         value = value.casefold()
         if value.startswith("object/mobile/") and value.endswith(".iff"):
             name = PurePosixPath(value).stem.removeprefix("shared_")
-            return name if name in ids else _one(templates[value])
+            matches = templates[value]
+            if actors and (speaker := _one(matches & actors)):
+                return speaker
+            if name in matches or not matches and name in ids:
+                return name
+            return _one(matches)
         return value if value in ids else None
 
     return resolve
@@ -235,15 +241,20 @@ def index_npc_speech(writer, files, dialogue):
             writer.link("npcs", npc, "dialogue", "conversations", table, evidence)
             writer.link("conversations", table, "npcs", "npcs", npc, evidence)
 
-    def add(npc, ref, audio, proof):
+    def add(npc, ref, audio, proof, role="scripted speech", binding=None, caption_note=None, quest=None):
         if ref:
             table, key = ref
-            speech_links[npc, table].setdefault(key, proof)
+            if npc:
+                speech_links[npc, table].setdefault(key, proof)
+            speaker = "npc" if npc else "system"
             usages = dialogue.init_table(table)[key]
-            if not any(use.get("source") == proof for use in usages):
-                usages.append({"source": proof, "speaker": "npc", "source_role": "scripted speech"})
+            for evidence, source_role in ((proof, role), (binding, "speaker binding")):
+                if evidence:
+                    usage = {"source": evidence, "speaker": speaker, "source_role": source_role, "npc": npc}
+                    if usage not in usages:
+                        usages.append(usage)
         if audio:
-            audio_cues.setdefault((npc, ref, audio), proof)
+            audio_cues.setdefault((npc, ref, audio, quest), SpeechCue(npc, ref, audio, proof, caption_note, quest))
 
     for ident, path in sorted(paths.items()):
         if any(part in ("test", "working", "beta") for part in path.parts):
@@ -285,10 +296,28 @@ def index_npc_speech(writer, files, dialogue):
             if action == "wookieecomm" and key + "_w" in dialogue.strings.table(table)[0]:
                 add(npc, _ref(table, key + "_w"), audio, row.source)
 
+    for cues in (greeter_voices(files, resolve), encounter_voices(files, resolve, dialogue.strings),
+                 collection_voices(files, resolve)):
+        for cue in cues:
+            add(*cue)
+
+    quests = {quest for quest, in writer.connection.execute("SELECT id FROM entity WHERE kind='quests'")}
+    givers = defaultdict(set)
+    for quest, npc in writer.connection.execute("""
+        SELECT id,target_id FROM link WHERE kind='quests' AND role='quest_givers' AND target_kind='npcs'
+    """):
+        givers[quest].add(npc)
+    for quest, npc, ref, audio, proof, role, note in quest_voices(files, resolve, quests, givers):
+        table = ref[0]
+        evidence = {"reason": role, "source": proof}
+        writer.link("quests", quest, "dialogue", "conversations", table, evidence)
+        writer.link("conversations", table, "quests", "quests", quest, evidence)
+        add(npc, ref, audio, proof, role, caption_note=note, quest=quest)
+
     for (npc, table), keys in speech_links.items():
         detail = {"reason": "NPC speech and comms", "speech_keys": sorted(keys),
                   "source": next(iter(keys.values()))}
         writer.link("npcs", npc, "dialogue", "conversations", table, detail)
         writer.link("conversations", table, "npcs", "npcs", npc, detail)
 
-    return [(npc, ref, sound, proof) for (npc, ref, sound), proof in audio_cues.items()]
+    return list(audio_cues.values())

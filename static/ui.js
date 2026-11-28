@@ -116,8 +116,8 @@ export function sourceControl(proof, className) {
   return source;
 }
 
-export function sectionSources(values) {
-  return values?.length ? section("Source records", values.map(sourceText).join("")) : "";
+export function sectionSources(values, introduction = "") {
+  return values?.length ? section("Source records", introduction + values.map(sourceText).join("")) : "";
 }
 
 export function facts(rows) {
@@ -180,7 +180,7 @@ function playbackConditions(uses) {
   return `<details class="sound-context"><summary>Playback conditions</summary>${contexts}</details>`;
 }
 
-export function linkRows(rows) {
+export function linkRows(rows, soundUse = "") {
   const titles = new Map();
   for (const entry of rows) {
     if (entry.card) titles.set(entry.card.name, (titles.get(entry.card.name) || 0) + 1);
@@ -193,7 +193,8 @@ export function linkRows(rows) {
     const price = entry.detail?.price != null ? integer(entry.detail.price) + " credits per unit" : "";
     const pools = entry.detail?.pool_min != null && entry.detail?.pool_max != null ?
       integer(entry.detail.pool_min) + "–" + integer(entry.detail.pool_max) + " pool size" : "";
-    const context = [recommended, required, data?.chapter || data?.category, entry.detail?.reason,
+    const soundUses = entry.kind === "sounds" ? entry.detail?.sound_uses || data?.sound_uses || [] : [];
+    const context = [recommended, required, data?.chapter || data?.category, ...soundUses.filter(use => use !== soundUse), entry.detail?.reason,
       entry.detail?.slot, price, pools].filter(Boolean).join(" · ");
     const duplicate = data && (titles.get(data.name) > 1 || entry.detail?.shared_name);
     const dialogue = entry.detail?.dialogue_lines || [];
@@ -204,7 +205,8 @@ export function linkRows(rows) {
       if (line.npc) params.set("npc", line.npc);
       const url = href("conversations", table) + "?" + params;
       return `<p><a class="dialog-code" href="${escapeHTML(url)}">${escapeHTML(line.text || line.code)}</a>${line.text ?
-        ` <small>${code(line.code)}</small>` : ""}</p>`;
+        ` <small>${code(line.code)}</small>` : ""}${line.caption_note ?
+        ` <small class="muted">${escapeHTML(line.caption_note)}</small>` : ""}</p>`;
     }).join("");
     const uses = entry.detail?.ambient_uses;
     const name = data ? entry.kind === "locations" && uses?.length ?
@@ -224,11 +226,12 @@ export function linkRows(rows) {
   }).join("");
 }
 
-export function relatedRows(kind, id, entity, role, empty) {
+export function relatedRows(kind, id, entity, role, empty, soundUse = "") {
   const info = entity.related[role];
   if (!info?.count) return `<p class="muted">${escapeHTML(empty)}</p>`;
-  return `<div data-related-list="${role}">${linkRows(info.rows)}${info.count > info.rows.length ?
-    `<button class="button" type="button" data-related-more="${role}" data-kind="${kind}" data-id="${escapeHTML(id)}" data-size="${info.rows.length}" data-page="2">Show more</button>` : ""}</div>`;
+  const scope = soundUse ? ` data-sound-use="${escapeHTML(soundUse)}" aria-label="Show more sounds for ${escapeHTML(soundUse)}"` : "";
+  return `<div data-related-list="${role}">${linkRows(info.rows, soundUse)}${info.count > info.rows.length ?
+    `<button class="button" type="button" data-related-more="${role}" data-kind="${kind}" data-id="${escapeHTML(id)}" data-size="${info.rows.length}" data-page="2"${scope}>Show more</button>` : ""}</div>`;
 }
 
 export function placementSection(kind, entity) {

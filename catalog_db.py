@@ -16,7 +16,8 @@ from catalog_quest_locations import publish_location_quests
 
 
 KINDS = ("quests", "npcs", "locations", "items", "schematics", "resources", "ships", "conversations", "sounds")
-SCHEMA = 13
+SCHEMA = 16
+SOUNDS_PER_CARD = 4
 SEARCH_INDEX = """CREATE INDEX IF NOT EXISTS entity_search ON entity (kind, search, name COLLATE NOCASE, id)"""
 BROWSE_INDEX = """CREATE INDEX IF NOT EXISTS entity_browse
     ON entity (kind, name COLLATE NOCASE, id, category, status, level, search, card)"""
@@ -25,6 +26,7 @@ BROWSE_SORT = {
     "world": """COALESCE((SELECT w.name FROM entity w WHERE w.kind='locations' AND w.id=entity.scene),
                          NULLIF(scene, '')) COLLATE NOCASE""",
     "category": "category COLLATE NOCASE",
+    "sound_use": "json_extract(card, '$.sound_uses[0]') COLLATE NOCASE",
     "level": "level",
     "giver": "json_extract(card, '$.givers[0]') COLLATE NOCASE",
     "difficulty": "COALESCE(json_extract(card, '$.difficulty'), category) COLLATE NOCASE",
@@ -74,8 +76,11 @@ def group_sound_rows(rows):
         template = next((row for row in matches if row["id"].endswith(".snd")), first)
         detail = dict(first["detail"])
         lines, uses = {}, {}
+        contextual_uses, catalog_uses = set(), set()
         for row in matches:
             evidence = row["detail"]
+            contextual_uses.update(evidence.get("sound_uses", ()))
+            catalog_uses.update((row["card"] or {}).get("sound_uses", ()))
             for line in evidence.get("dialogue_lines", ()):
                 lines.setdefault((line["code"], line.get("npc")), line)
             for use in evidence.get("ambient_uses", ()):
@@ -84,9 +89,28 @@ def group_sound_rows(rows):
             detail["dialogue_lines"] = list(lines.values())
         if uses:
             detail["ambient_uses"] = list(uses.values())
+        if sound_uses := contextual_uses or catalog_uses:
+            detail["sound_uses"] = sorted(sound_uses - {"Unclassified"} or sound_uses)
         result.append({**template, "detail": detail,
                        "sound_aliases": [row["id"] for row in matches if row is not template]})
     return result
+
+
+def _sound_use_order(use):
+    return use != "Voiceover", use == "Unclassified", use.casefold()
+
+
+def _primary_sound_use(row):
+    uses = row["detail"].get("sound_uses") or (row["card"] or {}).get("sound_uses", ())
+    return min(uses, key=_sound_use_order, default="Unclassified")
+
+
+def _sound_use_cards(rows):
+    by_use = {}
+    for row in rows:
+        by_use.setdefault(_primary_sound_use(row), []).append(row)
+    return [{"use": use, "count": len(by_use[use]), "rows": by_use[use][:SOUNDS_PER_CARD]}
+            for use in sorted(by_use, key=_sound_use_order)]
 
 
 def sql_sort(fields, sort):
@@ -212,7 +236,7 @@ class Catalog:
         return "entity INDEXED BY entity_browse" if indexed else "entity"
 
     def list(self, kind, *, query="", scene="", category="", status="", min_level=None, max_level=None,
-             acquisition="", storage="", page=1, size=30, sort="name"):
+             acquisition="", storage="", sound_use="", page=1, size=30, sort="name"):
         conditions = ["kind=?"]
         values = [kind]
         if kind == "locations":
@@ -246,6 +270,9 @@ class Catalog:
             elif storage in ("physical", "intangible"):
                 conditions.append("json_extract(card, '$.form') = ?")
                 values.append(storage)
+        if kind == "sounds" and sound_use:
+            conditions.append("EXISTS (SELECT 1 FROM json_each(card, '$.sound_uses') WHERE value=? COLLATE NOCASE)")
+            values.append(sound_use)
         where = " AND ".join(conditions)
         rank_args = ()
         if sort == "relevance":
@@ -321,7 +348,7 @@ class Catalog:
             return None
         return json.loads(row[1])
 
-    def entity(self, kind, ident, *, include_dialogue=False):
+    def entity(self, kind, ident, *, include_dialogue=False, sound_groups=False):
         if kind == "locations":
             ident = canonical_location(ident)
         with self.connect() as db:
@@ -332,6 +359,10 @@ class Catalog:
             grouped = {}
             for role, count in db.execute("SELECT role,COUNT(*) FROM link WHERE kind=? AND id=? GROUP BY role",
                                           (kind, ident)):
+                if role == "sounds" and sound_groups:
+                    rows = self._sound_rows(db, kind, ident)
+                    grouped[role] = {"count": len(rows), "groups": _sound_use_cards(rows)}
+                    continue
                 limit = count if kind == "quests" and role == "reward_items" else 60
                 total, rows = self._related_page(db, kind, ident, role, 1, limit, count=count)
                 grouped[role] = {"count": total, "rows": rows}
@@ -467,9 +498,14 @@ class Catalog:
                  **({"clip": clip} if target_kind == "sounds" else {})}
                 for target_kind, target_id, detail, card, clip in rows]
 
-    def _related_page(self, db, kind, ident, role, page, size, *, count=None):
+    def _sound_rows(self, db, kind, ident):
+        return group_sound_rows(self._links(db, kind, ident, "sounds", 1, -1))
+
+    def _related_page(self, db, kind, ident, role, page, size, *, count=None, sound_use=""):
         if role == "sounds":
-            rows = group_sound_rows(self._links(db, kind, ident, role, 1, -1))
+            rows = self._sound_rows(db, kind, ident)
+            if sound_use:
+                rows = [row for row in rows if _primary_sound_use(row) == sound_use]
             start = (page - 1) * size
             return len(rows), rows[start:start + size]
         if count is None:
@@ -477,11 +513,11 @@ class Catalog:
                                (kind, ident, role)).fetchone()[0]
         return count, self._links(db, kind, ident, role, page, size)
 
-    def links(self, kind, ident, role, page, size):
+    def links(self, kind, ident, role, page, size, *, sound_use=""):
         if kind == "locations":
             ident = canonical_location(ident)
         with self.connect() as db:
-            total, rows = self._related_page(db, kind, ident, role, page, size)
+            total, rows = self._related_page(db, kind, ident, role, page, size, sound_use=sound_use)
         return {"rows": rows, "total": total, "page": page, "size": size}
 
     def map_markers(self, scene, layers, bounds, query, columns, rows):
@@ -568,6 +604,7 @@ class Catalog:
             lines = [line for line in lines if line["key"] in speech_keys]
         if npc:
             for line in lines:
+                line["usages"] = [use for use in line["usages"] if use.get("npc", npc) == npc]
                 if line.get("sounds"):
                     line["sounds"] = [cue for cue in line["sounds"]
                                       if cue.get("npc") == npc or speech_keys is None and not cue.get("npc")]

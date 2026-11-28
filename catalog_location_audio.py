@@ -100,9 +100,12 @@ class LocationAudio:
             self.issues("Sounds", f"Could not read the location sound table {ref}. {type(error).__name__}.")
             return ()
 
-    def add(self, location, ident, use):
+    def add(self, location, ident, use, *, sound_use=None):
         if location not in self.places and location not in self.building_ids:
             return
+        if sound_use:
+            self.sounds.classify(ident, sound_use, use["source"], use["label"])
+            use = {**use, "sound_use": sound_use}
         for target in dict.fromkeys((ident, *self.sounds.ensure(ident)["samples"])):
             entries = self.uses[location, target]
             if use not in entries:
@@ -157,7 +160,7 @@ class LocationAudio:
                 "source": {"path": "clientdata/" + ref, "row": variants[0][0]},
                 **({"terrain": {"path": "clientdata/" + terrain}} if terrain else {}),
                 **({"coordinates": point} if point is not None else {}),
-            })
+            }, sound_use="Music" if "music" in label else "Ambience")
 
 
     def interiors(self):
@@ -192,7 +195,7 @@ class LocationAudio:
                     "label": label, "cells": list(dict.fromkeys(cells)),
                     "source": {"path": "clientdata/" + INTERIOR_TABLE, "row": row_id},
                     "portal": {"path": "clientdata/" + layout},
-                })
+                }, sound_use="Music" if "music" in label else "Ambience")
 
     def nebulae(self):
         columns = {"ambientSound": "Nebula ambience", "lightningSound": "Nebula lightning",
@@ -220,8 +223,9 @@ class LocationAudio:
                         continue
                     use = {"label": label, "context": row.get("name"), "coordinates": center,
                            "radius": radius, "source": {"path": "clientdata/" + ref, "row": number}}
+                    sound_use = "Ambience" if label == "Nebula ambience" else "Environmental effects"
                     for location in locations:
-                        self.add(location, ident, use)
+                        self.add(location, ident, use, sound_use=sound_use)
 
     def scripted(self, files, spatial, nearby):
         attachments = defaultdict(list)
@@ -289,6 +293,8 @@ class LocationAudio:
         for (location, ident), entries in self.uses.items():
             reason = " · ".join(dict.fromkeys(use["label"] for use in entries))
             detail = {"reason": reason, "ambient_uses": entries}
+            if sound_uses := sorted({use["sound_use"] for use in entries if "sound_use" in use}):
+                detail["sound_uses"] = sound_uses
             self.writer.link("locations", location, "sounds", "sounds", ident, detail)
             self.writer.link("sounds", ident, "locations", "locations", location, detail)
         return {"locations": len({location for location, _ in self.uses}),

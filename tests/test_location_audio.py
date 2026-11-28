@@ -167,6 +167,8 @@ public int playerEffect(obj_id self, obj_id player) {
             catalog = Catalog(database)
             town = catalog.entity("locations", CITY)
             rows = {row["id"]: row for row in town["related"]["sounds"]["rows"]}
+            self.assertEqual(rows[TOWN]["detail"]["sound_uses"], ["Ambience"])
+            self.assertEqual(catalog.entity("sounds", TOWN_CLIP)["card"]["sound_uses"], ["Ambience"])
             self.assertEqual(set(rows), {TOWN, CITY_NIGHT, SCRIPT_CUE, EFFECT_CUE})
             self.assertEqual(rows[TOWN]["clip"], TOWN_CLIP)
             self.assertEqual(set(rows[TOWN]["sound_aliases"]), {TOWN_CLIP, TOWN_NIGHT})

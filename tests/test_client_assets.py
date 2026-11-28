@@ -99,6 +99,102 @@ class ClientAssetsTests(unittest.TestCase):
             self.assertEqual(client_asset_root(root), root.resolve())
 
 
+    def test_sound_cards_choose_context_before_paging_distinct_players(self):
+        with TemporaryDirectory() as work:
+            database = Path(work) / "catalog.sqlite3"
+            writer = Writer(database)
+            try:
+                writer.entity("npcs", "fixture", "Fixture", {}, category="NPC")
+                writer.entity("locations", "fixture", "Fixture", {"scene": "fixture"}, category="World", scene="fixture")
+                recorded = {"reason": "Recorded dialogue", "sound_uses": ["Music", "Voiceover"]}
+                voices = []
+                for number in range(5):
+                    ident = f"sound/line_{number}.snd"
+                    clip = f"sample/line_{number}.wav"
+                    voices.append(ident)
+                    writer.entity("sounds", ident, f"Line {number}", {"playable": [clip]},
+                                  category="Sound template", card={"sound_uses": ["Voiceover"]})
+                    writer.link("npcs", "fixture", "sounds", "sounds", ident, recorded)
+                alias = "sample/line_0.wav"
+                writer.entity("sounds", alias, "Line 0 sample", {"playable": [alias]},
+                              category="Audio sample", card={"sound_uses": ["Voiceover"]})
+                writer.link("npcs", "fixture", "sounds", "sounds", alias)
+                writer.link("locations", "fixture", "sounds", "sounds", alias)
+                writer.link("locations", "fixture", "sounds", "sounds", voices[0], {"sound_uses": ["Ambience"]})
+
+                step = "sample/footsteps.wav"
+                writer.entity("sounds", step, "Footsteps", {"playable": [step]},
+                              category="Audio sample", card={"sound_uses": ["Footsteps"]})
+                writer.link("npcs", "fixture", "sounds", "sounds", step)
+                writer.link("npcs", "fixture", "sounds", "sounds", "sound/unknown.snd")
+                writer.finish({"locations": {}, "maps": {}})
+            finally:
+                writer.connection.close()
+
+            catalog = Catalog(database)
+            related = catalog.entity("npcs", "fixture", sound_groups=True)["related"]["sounds"]
+            self.assertEqual(related["count"], 7)
+            voice, steps, unknown = related["groups"]
+            self.assertEqual([(group["use"], group["count"]) for group in related["groups"]],
+                             [("Voiceover", 5), ("Footsteps", 1), ("Unclassified", 1)])
+            self.assertEqual([row["id"] for row in voice["rows"]], voices[:4])
+            self.assertEqual(voice["rows"][0]["sound_aliases"], [alias])
+            self.assertEqual(voice["rows"][0]["detail"]["sound_uses"], ["Music", "Voiceover"])
+            page = catalog.links("npcs", "fixture", "sounds", 2, 4, sound_use="Voiceover")
+            self.assertEqual(page["total"], 5)
+            self.assertEqual([row["id"] for row in page["rows"]], voices[4:])
+            self.assertEqual(steps["rows"][0]["id"], step)
+            self.assertEqual(unknown["rows"][0]["id"], "sound/unknown.snd")
+
+            heard = catalog.entity("locations", "fixture", sound_groups=True)["related"]["sounds"]
+            group, = heard["groups"]
+            self.assertEqual((group["use"], group["count"]), ("Ambience", 1))
+            self.assertEqual(group["rows"][0]["detail"]["sound_uses"], ["Ambience"])
+
+    def test_sound_uses_follow_native_categories_tables_and_shared_samples(self):
+        with TemporaryDirectory() as work:
+            root = Path(work)
+            shared = "sample/shared.wav"
+            voice = "sound/numbered.snd"
+            vocalization = "sound/growl.snd"
+            footsteps = "sound/cr_med_fs_sand.snd"
+            damage = "sound/contact.snd"
+            impact_table = "datatables/weapon/combat_effects_damage.iff"
+            for path, sample, category in (
+                (voice, shared, 13), (vocalization, shared, 6),
+                (footsteps, "sample/four.wav", 3), (damage, "sample/contact.wav", 7),
+            ):
+                payload = struct.pack("<I", 1) + sample.encode() + b"\0" + bytes(40) + struct.pack("<i", category)
+                snd = iff_form(b"SD2D", iff_chunk(b"0003", payload))
+                save(root / path, iff_form(b"SD3D", snd) if path == footsteps else snd)
+                save(root / sample, b"clip")
+            save(root / "sample/untitled.wav", b"clip")
+            save(root / impact_table, native_string_table(
+                (b"Hit Sound", b"Flyby sound"), (damage.encode(), b"sound/flyby.snd")))
+            index = SoundIndex(root, ModelLibrary(root))
+            index.inventory()
+            index.impacts()
+            database = root / "catalog.sqlite3"
+            writer = Writer(database)
+            try:
+                counts = index.publish(writer)
+                writer.finish({"locations": {}, "maps": {}, "sound_uses": counts})
+            finally:
+                writer.connection.close()
+
+            catalog = Catalog(database)
+            self.assertEqual(catalog.entity("sounds", footsteps)["data"]["mixer_category"], "Movement")
+            self.assertEqual(catalog.entity("sounds", "sample/four.wav")["card"]["sound_uses"], ["Footsteps"])
+            self.assertEqual(catalog.entity("sounds", shared)["card"]["sound_uses"], ["Vocalizations", "Voiceover"])
+            record = catalog.entity("sounds", damage)["data"]
+            self.assertEqual(record["sound_uses"], ["Damage and impacts"])
+            self.assertEqual(record["sound_use_evidence"][0]["source"], {"path": "clientdata/" + impact_table, "row": 1})
+            self.assertIsNone(catalog.entity("sounds", "sound/flyby.snd"))
+            self.assertEqual([row["id"] for row in catalog.list("sounds", sound_use="voiceover", category="Audio sample")["rows"]],
+                             [shared])
+            self.assertEqual([row["id"] for row in catalog.list("sounds", sound_use="Unclassified")["rows"]],
+                             ["sample/untitled.wav"])
+
     def test_dialogue_engine_playback_and_deployment_from_tre(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -175,6 +271,7 @@ public String reply(obj_id speaker, String response) {
             self.assertNotIn("sounds", catalog.dialogue(TABLE, "s_2", "", 1, 20)["rows"][0])
             sound = catalog.entity("sounds", TEMPLATE)
             self.assertEqual(sound["data"]["playable"], [SAMPLE, ALTERNATE_SAMPLE])
+            self.assertEqual(sound["data"]["sound_uses"], ["Engines", "Voiceover"])
             npc = catalog.entity("npcs", "fixture")
             sound_rows = npc["related"]["sounds"]["rows"]
             self.assertEqual(npc["related"]["sounds"]["count"], 3)
@@ -183,6 +280,7 @@ public String reply(obj_id speaker, String response) {
             preview = sound_rows[0]
             self.assertEqual(preview["id"], TEMPLATE)
             self.assertEqual(preview["sound_aliases"], [SAMPLE])
+            self.assertEqual(preview["detail"]["sound_uses"], ["Voiceover"])
             self.assertEqual({line["code"] for line in preview["detail"]["dialogue_lines"]},
                 {"@conversation/fixture:s_1", "@conversation/fixture:s_10", "@conversation/fixture:s_11"})
             sample = catalog.entity("sounds", SAMPLE)
@@ -232,18 +330,23 @@ public String reply(obj_id speaker, String response) {
                 script = """
 import { readFileSync } from "node:fs";
 import { linkRows } from "./ui.js";
-import { dialogueLines, entityPage } from "./views.js";
-const { sound, npc, laterRows, page } = JSON.parse(readFileSync(0, "utf8"));
+import { browsePage, dialogueLines, entityPage } from "./views.js";
+const { sound, sample, npc, laterRows, page, sounds, metadata } = JSON.parse(readFileSync(0, "utf8"));
 console.log(JSON.stringify({
     dialogue: dialogueLines(page, "", "", ""),
     sound: entityPage("sounds", sound, "overview", {}).html,
+    sample: entityPage("sounds", sample, "overview", {}).html,
     npc: entityPage("npcs", npc, "sounds", {}).html,
     more: linkRows(laterRows),
+    browse: browsePage("sounds", { sound_use: "Voiceover" }, sounds, metadata),
 }));
 """
                 rendered = subprocess.run([node, "--input-type=module", "-e", script], cwd=renderer,
-                    input=json.dumps({"sound": sound, "npc": npc, "laterRows": later_rows,
-                        "page": {"rows": lines, "total": 1, "page": 1, "size": 20}}),
+                    input=json.dumps({"sound": sound, "sample": sample, "laterRows": later_rows,
+                        "npc": catalog.entity("npcs", "fixture", sound_groups=True),
+                        "page": {"rows": lines, "total": 1, "page": 1, "size": 20},
+                        "sounds": catalog.list("sounds", sound_use="Voiceover"),
+                        "metadata": {**catalog.meta(), "sound_uses": {"Engines": 4, "Voiceover": 4}}}),
                     capture_output=True, encoding="utf-8")
                 self.assertEqual(rendered.returncode, 0, rendered.stderr)
                 pages = json.loads(rendered.stdout)
@@ -252,6 +355,14 @@ console.log(JSON.stringify({
                 self.assertEqual(pages["npc"].count('src="/api/audio?id=sample%2Fgreeting.mp3"'), 1)
                 self.assertIn('href="/sounds/sound%2Fgreeting.snd"', pages["npc"])
                 self.assertIn('href="/sounds/sample%2Fgreeting.mp3"', pages["sound"])
+                self.assertIn("Classification evidence", pages["sound"])
+                self.assertIn("<h2>Sound templates</h2>", pages["sample"])
+                self.assertIn("These client .snd files use this audio.", pages["sample"])
+                self.assertIn('<h2>Voiceover</h2>', pages["npc"])
+                self.assertIn("Recorded dialogue, narration, and scripted comms.", pages["npc"])
+                self.assertIn('href="/sounds?sound_use=Voiceover"', pages["sound"])
+                self.assertIn('name="sound_use"', pages["browse"])
+                self.assertIn('<option value="Voiceover" selected>', pages["browse"])
                 self.assertIn('src="/api/audio?id=sample%2Fgreeting.wav"', pages["more"])
                 self.assertIn("Sample unavailable", pages["npc"])
                 self.assertNotIn("/api/audio?id=sample%2Funavailable.wav", pages["npc"])

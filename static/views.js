@@ -95,7 +95,7 @@ function columns(kind) {
     resources: [["Resource", "name"], ["Category", "category"], ["Parent class", "parent"], ["Worlds", "worlds"]],
     ships: [["Ship", "name"], ["Role", "category"], ["Tier", "level"], ["Component slots", "slots"], ["Template", "template"]],
     conversations: [["Conversation", "name"], ["Lines", "lines"], ["Different", "different"], ["Missing", "missing"]],
-    sounds: [["Sound", "name"], ["Type", "category"], ["Format"], ["Playable samples"]],
+    sounds: [["Sound", "name"], ["Sound use", "sound_use"], ["Asset type", "category"], ["Format"], ["Playable samples"]],
   })[kind];
 }
 
@@ -122,7 +122,7 @@ function rowCells(kind, record, metadata) {
   if (kind === "resources") return [h(record.category), h(record.parent || "—"),
     record.worlds ? integer(record.worlds) : "—"];
   if (kind === "ships") return [h(record.category), tier, integer(record.slots), code(record.template)];
-  if (kind === "sounds") return [h(record.category), h(record.format), integer(record.playable)];
+  if (kind === "sounds") return [h(record.sound_uses?.join(", ") || "—"), h(record.category), h(record.format), integer(record.playable)];
   if (kind === "locations") return [scene, h(record.category), record.has_map ? tag("Map", "good") : "—"];
   return [integer(record.line_count), record.different ? tag(integer(record.different), "warn") : "—",
     record.missing ? tag(integer(record.missing), "bad") : "—"];
@@ -178,14 +178,17 @@ export function browsePage(kind, filters, result, metadata) {
   const levelFilter = ["quests", "npcs", "items", "ships"].includes(kind);
   const worldFilter = ["quests", "npcs", "locations", "resources"].includes(kind);
   const visibleStatuses = metadata.statuses[kind] || [];
+  const soundUses = kind === "sounds" ? Object.keys(metadata.sound_uses || {}) : [];
   const filtersHtml = `<form id="browse-filters" class="panel filters">
       <div class="filter-heading"><h2>Filters</h2><a href="${href(kind)}">Clear</a></div>
       ${worldFilter ? `<label class="filter-label">${kind === "quests" ? "Origin world" : "World"}
         <select name="scene">${opt("", "All worlds", filters.scene)}${worlds.map(([id, value]) =>
           opt(id, worldNames.get(value.name) > 1 ? value.name + " (" + id + ")" : value.name,
             isLocations ? locationId(filters.scene, metadata) : filters.scene)).join("")}</select></label>` : ""}
-      <label class="filter-label">${kind === "quests" ? "Quest family" : "Category"}<select name="category">
-        ${opt("", "All categories", filters.category)}${metadata.categories[kind].map(category => opt(category, category, filters.category)).join("")}</select></label>
+      ${soundUses.length ? `<label class="filter-label">Sound use<select name="sound_use">
+        ${opt("", "All uses", filters.sound_use)}${soundUses.map(use => opt(use, use, filters.sound_use)).join("")}</select></label>` : ""}
+      <label class="filter-label">${kind === "quests" ? "Quest family" : kind === "sounds" ? "Asset type" : "Category"}<select name="category">
+        ${opt("", "All " + (kind === "sounds" ? "types" : "categories"), filters.category)}${metadata.categories[kind].map(category => opt(category, category, filters.category)).join("")}</select></label>
       ${levelFilter ? `<fieldset class="level-filter"><legend>${kind === "quests" ? "Recommended level" : kind === "ships" ? "Chassis tier" : "Level"}</legend>
         <div class="range"><input name="min" type="number" aria-label="Minimum ${kind === "ships" ? "tier" : "level"}" placeholder="Min" min="0" max="999" value="${h(filters.min)}">
         <input name="max" type="number" aria-label="Maximum ${kind === "ships" ? "tier" : "level"}" placeholder="Max" min="0" max="999" value="${h(filters.max)}"></div></fieldset>` : ""}
@@ -725,6 +728,40 @@ function standaloneConversation(entity) {
     + conversationContent)}${dynamic}</div>`;
 }
 
+const soundUseDescriptions = {
+  "Voiceover": "Recorded dialogue, narration, and scripted comms.",
+  "Ambience": "Background audio such as wind, wildlife, and the hum of an interior.",
+  "Damage and impacts": "Hit, collision, and damage reaction sounds for characters, objects, and ships.",
+  "Engines": "Engine audio such as startup, shutdown, and thrust.",
+  "Environmental effects": "Sounds tied to events in the environment, such as lightning.",
+  "Explosions": "Detonations and destruction effects.",
+  "Footsteps": "Footfalls that can vary by creature or walking surface.",
+  "Items": "Sounds assigned to items and components, such as handling sounds and alarms.",
+  "Machinery": "Mechanical hum, operation sounds, and equipment alarms.",
+  "Movement": "Body and motion sounds such as landings, falls, and gestures.",
+  "Music": "Background music, encounter cues, and player performances.",
+  "User interface": "Sounds for menus, targeting, and interface notifications.",
+  "Vehicles": "Sounds for vehicles and ships, such as moving parts and flybys.",
+  "Vocalizations": "Character and creature sounds such as grunts, growls, calls, and combat cries.",
+  "Weapons": "Weapon fire, swings, and other sounds tied to an attack.",
+  "Unclassified": "The game files provide too little evidence to assign a specific use.",
+};
+
+function describeSoundCard(description) {
+  return description ? `<p class="sound-card-description">${h(description)}</p>` : "";
+}
+
+function soundUseCards(kind, id, groups, label) {
+  return `<div class="sound-use-cards" role="group" aria-label="${h(label)}">${groups.map(group =>
+    `<section class="panel section sound-use-card" aria-label="${h(group.use)}">
+      <header class="sound-use-heading"><h2>${h(group.use)}</h2>
+        <span class="count-label">${integer(group.count)} ${group.count === 1 ? "sound" : "sounds"}</span>
+      </header>
+      ${describeSoundCard(soundUseDescriptions[group.use])}
+      ${relatedRows(kind, id, { related: { sounds: group } }, "sounds", "", group.use)}
+    </section>`).join("")}</div>`;
+}
+
 function soundOverview(entity) {
   const { card, data, related } = entity;
   const rows = data.samples.length ? data.samples : data.playable;
@@ -736,13 +773,28 @@ function soundOverview(entity) {
       ${playable.has(id) ? audioPlayer(id, name) : '<p class="muted">Sample unavailable</p>'}
     </div>`;
   }).join("");
-  const uses = [["templates", "Sound templates"], ["conversations", "Dialogue"], ["npcs", "NPCs"],
-    ["quests", "Quests"], ["ships", "Ships"], ["items", "Items and components"]];
+  const references = [
+    ["templates", "Sound templates", "These client .snd files use this audio. A template can choose among samples and control settings such as looping and volume."],
+    ["conversations", "Dialogue", "Conversation lines and scripted messages linked to this audio."],
+    ["npcs", "NPCs", "Characters and creatures whose dialogue, scripts, or models reference this sound."],
+    ["quests", "Quests", "Quests that reference this sound in dialogue or scripted events."],
+    ["ships", "Ships", "Ships that reference this sound through their client data or equipment, such as engines."],
+    ["items", "Items and components", "Items and ship components whose client data or scripts reference this audio."],
+  ];
+  const playback = card.category === "Sound template" ?
+    "Preview the individual audio files this template uses." : "Listen to the original audio file from the game client.";
+  const categories = (data.sound_uses || []).map(use =>
+    `<a href="${href("sounds")}?${new URLSearchParams({ sound_use: use })}">${h(use)}</a>`).join(", ");
+  const evidence = (data.sound_use_evidence || []).map(({ use, basis, source }) =>
+    `<li>${h(use)} · ${h(basis)} ${sourceText(source)}</li>`).join("");
   return `<div class="stack">
-    ${section("Playback", samples || '<p class="muted">No playable sample is available in the selected client data.</p>')}
-    ${uses.filter(([role]) => related[role]?.count).map(([role, name]) =>
-      section(name, relatedRows("sounds", card.id, entity, role, ""))).join("")}
-    ${sectionSources(data.sources)}
+    ${section("Playback", describeSoundCard(playback) + (samples || '<p class="muted">No playable sample is available in the selected client data.</p>'))}
+    ${categories ? section("Sound use", describeSoundCard("These labels describe how the game uses this audio. Select a label to browse sounds used the same way.") + facts([
+      ["Use", categories], ["Client mixer category", h(data.mixer_category) || null],
+    ]) + (evidence ? `<details class="sound-context"><summary>Classification evidence</summary><ul>${evidence}</ul></details>` : "")) : ""}
+    ${references.filter(([role]) => related[role]?.count).map(([role, name, description]) =>
+      section(name, describeSoundCard(description) + relatedRows("sounds", card.id, entity, role, ""))).join("")}
+    ${sectionSources(data.sources, describeSoundCard("Game files used to document this sound."))}
   </div>`;
 }
 
@@ -756,6 +808,7 @@ export function dialogueLines(page, query, filter, sort) {
     const audio = (line.sounds || []).map(cue => {
       const label = cue.music ? "Music cue" : "Recorded audio";
       return `<div class="sound-preview">${cue.clip ? audioPlayer(cue.clip, label + " for " + line.key) : ""}
+        ${cue.caption_note ? `<small class="muted">${h(cue.caption_note)}</small>` : ""}
         ${link("sounds", cue.id, cue.music ? label : "Sound details")}${sourceText(cue.source)}</div>`;
     }).join("");
     return `<tr><td>${copyMarkup(line.code, line.code, "Copy string code", "copy-code dialog-code")}${line.speakers.length ? `<small class="entity-sub">${h(line.speakers.map(readable).join(", "))}</small>` : ""}</td>
@@ -789,10 +842,13 @@ export function entityPage(kind, entity, requestedView, metadata) {
   let body;
   if (view === "sounds") {
     const title = kind === "locations" ? "Sounds heard here" : "Associated sounds";
-    body = section(title, relatedRows(kind, card.id, entity, "sounds", "No linked sounds are recorded."));
+    const groups = entity.related.sounds?.groups;
+    body = groups ? soundUseCards(kind, card.id, groups, title) :
+      section(title, relatedRows(kind, card.id, entity, "sounds", "No linked sounds are recorded."));
   } else if (kind === "sounds") {
-    body = view === "locations" ? section("Where it plays", relatedRows(
-      kind, card.id, entity, "locations", "No locations are recorded for this sound.")) : soundOverview(entity);
+    body = view === "locations" ? section("Where it plays",
+      describeSoundCard("Places where the game can play this sound. Playback conditions show when or where each use applies.") +
+      relatedRows(kind, card.id, entity, "locations", "No locations are recorded for this sound.")) : soundOverview(entity);
   } else if (view === "dialogue") {
     body = conversationGroup(entity);
   } else if (kind === "quests") {

@@ -10,7 +10,7 @@ const pageLoading = document.querySelector("#page-loading");
 const modal = document.querySelector("#archive-search");
 const globalQuery = document.querySelector("#global-query");
 const globalResults = document.querySelector("#global-results");
-const browseKeys = ["q", "scene", "category", "status", "min", "max", "acquisition", "storage", "sort", "page"];
+const browseKeys = ["q", "scene", "category", "status", "min", "max", "acquisition", "storage", "sound_use", "sort", "page"];
 const pageVersion = document.documentElement.dataset.archiveVersion;
 let catalog;
 let versionRequest;
@@ -128,7 +128,7 @@ async function render({ page: pageNumber, sortKey } = {}) {
       filters = Object.fromEntries(browseKeys.map(key => [key, search.get(key) || ""]));
       request = getJSON("/api/list", { type: kind, ...filters }, signal);
     } else {
-      request = samePage && current.entity ? current.entity : getJSON("/api/entity", { type: kind, id }, signal);
+      request = samePage && current.entity ? current.entity : getJSON("/api/entity", { type: kind, id, sound_groups: 1 }, signal);
     }
     const [metadata, result] = await Promise.all([catalog, request]);
     if (signal.aborted) return;
@@ -412,10 +412,10 @@ async function loadRelated(button) {
   try {
     const result = await getJSON("/api/related", {
       type: button.dataset.kind, id: button.dataset.id, role: button.dataset.relatedMore,
-      page: button.dataset.page, size: button.dataset.size,
+      page: button.dataset.page, size: button.dataset.size, sound_use: button.dataset.soundUse,
     }, signal);
     if (signal.aborted || !button.isConnected) return;
-    button.insertAdjacentHTML("beforebegin", linkRows(result.rows));
+    button.insertAdjacentHTML("beforebegin", linkRows(result.rows, button.dataset.soundUse));
     if (result.page * result.size >= result.total) button.remove();
     else button.dataset.page = result.page + 1;
   } catch (error) {

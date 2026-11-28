@@ -26,7 +26,7 @@ LOOT_BASIS = ("Chance of at least one copy per eligible defeat at the NPC's auth
               "under standard server settings. Rates that depend on additional scripted conditions "
               "are recorded separately.")
 ENTITY_CONTENTS = {
-    "sounds": "Native sound templates and audio samples with authored uses and playback paths.",
+    "sounds": "Native sound templates and audio samples with use classifications, evidence, and playback paths.",
     "quests": "Quest givers, prerequisites, objectives, rewards, quest chains, and dialogue references.",
     "npcs": "Creature and character profiles, base levels, equipment, spawn sources, and model references.",
     "locations": "Worlds, regions, towns, buildings, interior cells, map bounds, and location descriptions.",
@@ -79,6 +79,7 @@ def agent_manifest(metadata):
             "placement": "/api/placement?id={id}",
             "dialogue": "/api/dialogue?table={id}&page={page}&size={size}",
             "audio_sample": "/api/audio?id={id}",
+            "sounds_by_use": "/api/list?type=sounds&sound_use={use}",
             "item_drop_ranking": LOOT_ROUTE + "?q={name}",
             "exact_item_drop_ranking": LOOT_ROUTE + "?item={id}",
             "item_drop_evidence": "/api/item-loot-npcs?type=items&id={id}&sort=chance-desc&page={page}",
@@ -94,6 +95,7 @@ def agent_manifest(metadata):
             "source": "/source?path={path}&line={line}",
             "catalog_metadata": "/api/meta",
         },
+        "sound_uses": metadata.get("sound_uses", {}),
         "loot": {"basis": LOOT_BASIS, "chance_unit": "fraction from 0 to 1",
                  "chance_percent_unit": "percentage from 0 to 100", "max_compared_items": MAX_CANDIDATES,
                  "max_rows_per_item": MAX_DROPS},
@@ -354,6 +356,7 @@ def main():
     browse.add_argument("--query", default="")
     browse.add_argument("--scene", default="")
     browse.add_argument("--category", default="")
+    browse.add_argument("--sound-use", default="", help="Filter sounds by use, such as Voiceover or Footsteps.")
     pagination(browse)
     related = commands.add_parser("related", help="Page through one entity's related records.")
     related.add_argument("kind", choices=KINDS)
@@ -393,7 +396,7 @@ def main():
             result = catalog.search(args.query)
         elif args.command == "list":
             result = catalog.list(args.kind, query=args.query, scene=args.scene, category=args.category,
-                                  page=args.page, size=args.size)
+                                  sound_use=args.sound_use, page=args.page, size=args.size)
         elif args.command == "related":
             result = catalog.links(args.kind, args.id, args.role, args.page, args.size)
         elif args.command == "placements":

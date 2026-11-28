@@ -523,7 +523,8 @@ def write_catalog(writer, profile, issues):
     sounds.dialogue(writer, dialogue, comms)
     sounds.authored(writer, files)
     sounds.engines(writer, files)
-    sounds.publish(writer, issues)
+    sounds.impacts()
+    sound_uses = sounds.publish(writer, issues)
 
     dialogue_stats = Counter()
     for table in sorted(dialogue.tables):
@@ -556,7 +557,7 @@ def write_catalog(writer, profile, issues):
                           "legacy_descriptions": len(legacy),
                           "spawn_coverage": {**spawns.stats, **spawns.scripts.stats},
                           "model_coverage": model_coverage, "loot_coverage": loot_coverage,
-                          "location_sound_coverage": location_sound_coverage,
+                          "location_sound_coverage": location_sound_coverage, "sound_uses": sound_uses,
                           "systems": manifest.get("other_quest_systems", [])}, spawns)
 
 

@@ -209,15 +209,24 @@ Select it again to reverse the order.
   Lines with recorded audio in their conversation script have a player and
   a link to the sound detail page.
 - **Sounds** lists the client’s sound templates, voice recordings, effects,
-  and music. Each detail page links to its native samples and the quests,
-  conversations, NPCs, locations, ships, or items that reference it. Engine
-  component links come from the ship’s authored attachment data. The page
-  shows whether a referenced sample is present in the selected client.
-  Play linked clips directly from an object's Sounds tab. Entries that
-  preview the same client sample share one player. Open a sound template
-  to see its full sample list. NPC Sounds tabs put recorded dialogue first
-  and link to the matching line by string code. NPC Dialogue tabs play recordings
+  and music. Use the **Sound use** filter to find voiceovers, ambience,
+  footsteps, impacts, and other audio. Open a sound to see evidence from
+  client mixer categories, authored playback, or recognizable asset names.
+  A shared sample can have multiple uses. Each detail page links to its native
+  samples and the quests, conversations, NPCs, locations, ships, or items that
+  reference it. Engine component links come from the ship’s authored attachment
+  data. The page shows whether a referenced sample is present in the selected client.
+  Play linked clips directly from an object's Sounds tab. Each card describes
+  a sound use and pages through its clips independently. Entries that preview
+  the same client sample share one player. Open a sound template to see its
+  full sample list. The Voiceover card links to matching lines by string code.
+  NPC Dialogue tabs play recordings
   inline for conversations, scripted comms, and cinematic sequences.
+  The Archive also reads greeter voice options, heroic encounter comms,
+  and recorded collection messages. Greeter menu captions are labeled
+  where they accompany a recording. Quest comms link to the matching NPC
+  when the game identifies a speaker, and tutorial narration plays beside
+  the corresponding quest message.
   Location Sounds tabs include outdoor environment profiles, building cells,
   nebulae, and scripted playback with a resolved location. A sound's
   Locations tab links back to those places and shows playback conditions

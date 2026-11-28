@@ -284,17 +284,17 @@ class ArchiveHandler(BaseHTTPRequestHandler):
                 kind, query=query, scene=field("scene"), category=field("category"), status=status,
                 min_level=normalize_int(field("min"), None, 0, 999),
                 max_level=normalize_int(field("max"), None, 0, 999),
-                acquisition=field("acquisition"), storage=field("storage"), page=page, size=size,
-                sort=sort_order(BROWSE_SORT, "name"),
+                acquisition=field("acquisition"), storage=field("storage"), sound_use=field("sound_use"),
+                page=page, size=size, sort=sort_order(BROWSE_SORT, "name"),
             ))
         elif path == "/api/entity":
-            result = catalog.entity(kind, field("id"))
+            result = catalog.entity(kind, field("id"), sound_groups=field("sound_groups") == "1")
             self.json(result) if result is not None else self.missing("Entry")
         elif path == "/api/item-loot-npcs" and kind == "items":
             self.json(catalog.item_loot_npcs(field("id"), page, size, query=query,
                                              sort=sort_order(("name", "level", "chance"), "chance-desc")))
         elif path == "/api/related":
-            self.json(catalog.links(kind, field("id"), field("role"), page, size))
+            self.json(catalog.links(kind, field("id"), field("role"), page, size, sound_use=field("sound_use")))
         elif path == "/api/placements" and kind in ("items", "locations", "npcs"):
             self.json(catalog.placements(kind, field("id"), scene=field("scene"), query=query,
                                          spawn_type=field("spawn"), page=page, size=size, sort=sort_order(PLACEMENT_SORT)))

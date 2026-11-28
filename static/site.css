@@ -304,6 +304,11 @@ details > :not(summary):last-child { margin-bottom: 12px; }
 .sound-context { max-width: 100%; border: 0; }
 .sound-context > summary { padding: 4px 0; font-size: .82rem; }
 .sound-context-use + .sound-context-use { margin-top: 9px; }
+.sound-use-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 36rem), 1fr)); gap: 17px; align-items: start; }
+.sound-use-card { min-width: 0; }
+.sound-use-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 6px; }
+.sound-card-description { color: var(--muted); font-size: .9rem; line-height: 1.5; max-width: 75ch; margin-bottom: 8px; }
+.sound-use-card [data-related-more] { margin-top: 8px; }
 .rich-detail { color: var(--muted); font-size: .87rem; overflow-wrap: anywhere; }
 .entry-label { display: flex; align-items: center; gap: 10px; }
 .resource-icon { width: 28px; height: 28px; flex: none; object-fit: contain; }
