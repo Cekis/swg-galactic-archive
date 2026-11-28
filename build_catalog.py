@@ -2,11 +2,12 @@
 
 import argparse
 from collections import Counter, defaultdict
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import hashlib
 import json
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 
@@ -29,6 +30,7 @@ from catalog_map import LAYERS
 from catalog_models import ModelLibrary
 from catalog_npc_models import NpcModels
 from catalog_npc_speech import index_npc_speech
+from catalog_publish import CatalogBuildError, READY_FOR, build_lock, discard_stage, publish_catalog, staged_catalogs
 from catalog_sounds import SoundIndex
 from catalog_spawns import SpawnIndex
 from catalog_sources import (
@@ -558,18 +560,64 @@ def write_catalog(writer, profile, issues):
                           "systems": manifest.get("other_quest_systems", [])}, spawns)
 
 
-def build(path, profile):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="index-", dir=path.parent) as work:
-        candidate = Path(work) / "catalog.sqlite3"
-        writer = Writer(candidate)
-        issues = BuildIssues()
+def _matches_sources(catalog, profile):
+    try:
+        recorded = catalog.metadata()
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        return False
+    selected = profile.clientdata
+    signature = selected.installation.signature if isinstance(selected, ClientAssetPath) else None
+    return (isinstance(recorded, dict) and recorded.get("source_key") == profile.key
+            and recorded.get("schema") == SCHEMA and recorded.get("client_installation") == signature
+            and "build_issue_count" in recorded)
+
+
+def _reuse_catalog(path, profile, pending):
+    catalog = Catalog(path)
+    current = path.is_file() and _matches_sources(catalog, profile)
+    installed_at = path.stat().st_mtime_ns if current else -1
+    ready = next((candidate for timestamp, candidate in pending if timestamp > installed_at
+                  and _matches_sources(Catalog(candidate), profile)), None)
+    if ready:
+        publish_catalog(ready, path)
+        catalog = Catalog(path)
+        for _, candidate in pending:
+            discard_stage(path, candidate)
+        print(f"Published the previously completed catalog {path}", flush=True)
+    elif current:
+        print(f"Reusing catalog {path}", flush=True)
+    else:
+        return False
+    for issue in catalog.build_issues():
+        print_build_issue(*issue)
+    return True
+
+
+def build(path, profile, *, if_needed=False):
+    path = path.parent.resolve() / path.name
+    with build_lock(path):
+        pending = staged_catalogs(path)
+        if if_needed and _reuse_catalog(path, profile, pending):
+            return None
+
+        work = Path(tempfile.mkdtemp(prefix="index-", dir=path.parent))
+        candidate = work / "catalog.sqlite3"
+        completed = False
         try:
-            metadata = write_catalog(writer, profile, issues)
+            writer = Writer(candidate)
+            try:
+                metadata = write_catalog(writer, profile, BuildIssues())
+            finally:
+                writer.connection.close()
+            completed = True
+            (work / READY_FOR).write_text(path.name, encoding="utf-8")
+            for _, previous in pending:
+                discard_stage(path, previous)
+            publish_catalog(candidate, path)
+            return metadata
         finally:
-            writer.connection.close()
-        candidate.replace(path)
-    return metadata
+            if not completed or not candidate.is_file():
+                discard_stage(path, candidate)
 
 
 def main():
@@ -578,35 +626,29 @@ def main():
     parser.add_argument("--if-needed", action="store_true", help="Reuse a catalog built from the selected sources.")
     args = parser.parse_args()
     log_path = args.database.resolve().with_suffix(".build.log") if args.database else PROJECT / ".local/build.log"
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = log_path.open("w", encoding="utf-8", buffering=1)
-    except OSError as error:
-        parser.error(f"Cannot open build log {log_path}. {error}")
-    with log, redirect_stdout(BuildOutput(sys.stdout, log)):
+    with ExitStack() as resources:
+        try:
+            resources.enter_context(build_lock(log_path))
+            log = resources.enter_context(log_path.open("w", encoding="utf-8", buffering=1))
+        except CatalogBuildError as error:
+            parser.exit(1, f"ERROR [Build] {error}\n")
+        except OSError as error:
+            parser.error(f"Cannot open build log {log_path}. {error}")
+        resources.enter_context(redirect_stdout(BuildOutput(sys.stdout, log)))
         print(f"Build log {log_path}", flush=True)
         try:
             profile = select_profile(args)
-            database = args.database or profile.database
-            if args.if_needed and database.is_file():
-                catalog = Catalog(database)
-                recorded = catalog.metadata()
-                selected = profile.clientdata
-                signature = selected.installation.signature if isinstance(selected, ClientAssetPath) else None
-                if (recorded.get("source_key") == profile.key and recorded.get("schema") == SCHEMA
-                        and recorded.get("client_installation") == signature and "build_issue_count" in recorded):
-                    print(f"Reusing catalog {database}", flush=True)
-                    for issue in catalog.build_issues():
-                        print_build_issue(*issue)
-                    return
-            metadata = build(database, profile)
+            metadata = build(args.database or profile.database, profile, if_needed=args.if_needed)
         except Exception as error:
             print(f"ERROR [Build] {error}", flush=True)
+            if isinstance(error, CatalogBuildError):
+                parser.exit(1)
             if isinstance(error, (OSError, ValueError)):
                 parser.error(str(error))
             raise
-        print(json.dumps({key: metadata[key] for key in
-                          ("counts", "inventory", "dialogue", "map_data", "build_issue_count")}, indent=2), flush=True)
+        if metadata is not None:
+            print(json.dumps({key: metadata[key] for key in
+                              ("counts", "inventory", "dialogue", "map_data", "build_issue_count")}, indent=2), flush=True)
 
 
 if __name__ == "__main__":

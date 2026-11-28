@@ -126,11 +126,16 @@ resource or string tables. A launch that reuses a catalog lists its recorded war
 in the fresh log. An explicit `--database` path writes a `.build.log` beside
 that database.
 
-Every rebuild creates a fresh SQLite catalog in a temporary file. A
-successful build replaces the previous catalog, so changed records and
-links are updated and deleted source records disappear. A failed build
-leaves the last successful catalog available. The generated catalog and
-recovered asset cache live under `.local/profiles/` for each configuration.
+Every rebuild creates a fresh SQLite catalog in a temporary file and
+publishes it atomically. On Windows, an open catalog can delay publication.
+The builder retries briefly and saves the completed catalog if Windows
+continues to deny the replacement. Close the program holding the catalog
+and run `./start.ps1` to publish the saved build. For a direct build command,
+repeat it with `--if-needed` and the same options. The saved build is reused
+when its sources and client match the current configuration.
+
+The generated catalog and recovered asset cache live under
+`.local/profiles/` for each configuration.
 
 Open [the catalog metadata](http://127.0.0.1:8768/api/meta) after starting
 the server to check the resolved source revisions and record counts. To
